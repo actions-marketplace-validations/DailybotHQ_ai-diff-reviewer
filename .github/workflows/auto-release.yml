@@ -37,7 +37,7 @@ jobs:
       !contains(github.event.head_commit.message, '[skip release]')
     steps:
       - name: Step 0 - 📥 Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
           token: ${{ secrets.AUTOMATION_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
