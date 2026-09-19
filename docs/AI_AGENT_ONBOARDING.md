@@ -14,15 +14,15 @@ You're an AI coding agent (Claude Code, Cursor, Codex, Gemini, Copilot, OpenClaw
 
 An LLM-driven code-review system that ships on **two surfaces from the same codebase**:
 
-1. **A GitHub Action** — composite action, `action.yml` + `scripts/reviewer.py` (~4000 LOC, stdlib only). Distributed via the GitHub Marketplace. This is what most of the runtime code implements.
+1. **A GitHub Action** — composite action, `action.yml` + `scripts/reviewer.py` (~10k LOC, stdlib only). Distributed via the GitHub Marketplace. This is what most of the runtime code implements.
 2. **A local companion skill** — `skills/ai-diff-reviewer/`, distributed via `npx skills add`. The skill runs the SAME review methodology inside the developer's coding agent (Cursor, Claude Code, Codex, Gemini, Copilot, Cline, Windsurf) using the same `prompts/default.md`. See [ARCHITECTURE.md § "Two surfaces, one methodology"](ARCHITECTURE.md#two-surfaces-one-methodology).
 
 **Both surfaces are equally important.** If you're changing the review prompt, the severity model, or anything that affects how the reviewer sees a diff, your change affects both surfaces — the `Skills — prompt-sync invariant` CI job in `code_check.yml` enforces this.
 
-As of v1.1.0 the runtime ships with **four providers across two families**:
+As of v2.1.0 the runtime ships with **six runners across two families**, plus an optional `api-base` backend input (Anthropic, OpenAI, Azure Foundry, xAI, Z.ai, custom gateways):
 
-- **Chat-completions family** (this action drives the tool-use loop): `anthropic`.
-- **Agent-runner family** (vendor CLI drives the loop; findings return via `.aiprr/findings.json`): `claude-code`, `cursor`, `codex`.
+- **Chat-completions family** (this action drives the tool-use loop): `anthropic`, `openai`.
+- **Agent-runner family** (vendor CLI drives the loop; findings return via `.aiprr/findings.json`): `claude-code`, `cursor`, `codex`, `grok`.
 
 The two families converge on a shared `ReviewResult` payload before submission, so downstream behaviour (severity gating, 422 fallback, tracking comment) is identical.
 
@@ -123,3 +123,17 @@ The pattern, when uncertain:
 The runtime is small. You can read `scripts/reviewer.py` in an hour. Do that before reaching for tools or asking; the answer is usually already in the code.
 
 The skill pack (`skills/ai-diff-reviewer/`) is smaller — four `SKILL.md` files + a `reference.md` + a `prompt.md`. Read those to understand the local-companion surface before touching it.
+
+## DeepWorkPlan sub-skills
+
+| Sub-skill | Purpose |
+|---|---|
+| `create` | Decompose a goal into a Deep Work Plan (Lite or Full) with per-task validation gates. |
+| `execute` | Run a plan task by task, checking each gate, updating progress. |
+| `refine` | Modify a plan (add, split, reorder, promote Lite→Full, migrate legacy) while preserving completed work. |
+| `resume` | Reconstruct state and continue an interrupted plan across sessions or agents. |
+| `status` | Report progress without making changes. |
+| `verify` | Emit an objective CONFORMANT / NOT CONFORMANT verdict against the DWP spec's Conformance document. |
+| `onboard` | Make a repository AI-first, or run a targeted harness upgrade (reasoned analysis + non-destructive generation). |
+| `author` | Author or evolve this repo's own skills, agents, and commands. |
+| `upgrade` | Check for a newer DeepWorkPlan skill release; read-only until consent, then installs the accepted tag and re-onboards. |

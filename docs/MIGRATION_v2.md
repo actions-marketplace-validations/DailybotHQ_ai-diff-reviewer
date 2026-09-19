@@ -4,13 +4,17 @@
 **Skill:** `npx skills add DailybotHQ/ai-diff-reviewer@v2 --skill ai-diff-reviewer`  
 (or `npx skills update ai-diff-reviewer`)
 
-Exact pin when you want a frozen tag: `@v2.0.0` (skill frontmatter `version: "2.0.0"`).
+Exact pin when you want a frozen tag: `@v2.1.0` (skill frontmatter `version: "2.1.0"`); earlier frozen tags on this major: `@v2.0.1`, `@v2.0.0`.
 
 ## Contract
 
 - No `action.yml` inputs renamed or removed for this major.
 - Env-var prefix stays `AIPRR_`.
 - Repo path: `DailybotHQ/ai-diff-reviewer`.
+
+## v2.1.0 is additive
+
+Nothing to migrate: the new runners (`openai`, `grok`), the `api-base` / `ignore-paths` / `grok-version` inputs, model tier aliases, usage telemetry and incremental follow-up reviews are all opt-in or invisible defaults. An empty `api-base` keeps every existing runner byte-identical to v2.0.x.
 
 ## Platform behaviour (v2)
 

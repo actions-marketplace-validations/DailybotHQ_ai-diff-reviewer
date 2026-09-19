@@ -2,7 +2,48 @@
 
 **Purpose:** Single source of truth for every AI coding assistant working on this repository (Claude Code, Cursor, OpenAI Codex, Google Gemini, GitHub Copilot, OpenClaw, and others). Human contributors are also welcome readers — this file is the fastest way to get oriented.
 
-The product name in user-facing strings is **"AI Diff Reviewer"** (capitalised exactly that way). The **git repository slug** is `DailybotHQ/ai-diff-reviewer` — renamed from `DailybotHQ/ai-pr-reviewer` on 2026-07-14 to unblock Marketplace publish (see Rule #9). Old `uses: DailybotHQ/ai-pr-reviewer@v1` pins keep working via GitHub's permanent 301 redirect for renamed repos; new copy-paste examples in the README always use the canonical `DailybotHQ/ai-diff-reviewer` path. The **Marketplace listing slug** is `ai-diff-reviewer`, derived from the `action.yml` `name:` field — matches the repo slug exactly. Vendor attribution is handled by GitHub automatically via the `author:` field (`DailybotHQ`) — the Marketplace tile renders "by DailybotHQ" beneath the title, so we do NOT embed "Dailybot" in the `name:` field. See Rule #9 for the full rename decision log.
+The product name in user-facing strings is **"AI Diff Reviewer"** (capitalised exactly that way). The **git repository slug** is `DailybotHQ/ai-diff-reviewer` — renamed from `DailybotHQ/ai-pr-reviewer` on 2026-07-14 to unblock Marketplace publish (see Rule #9). Old `uses: DailybotHQ/ai-pr-reviewer@v1` pins keep working via GitHub's permanent 301 redirect for renamed repos; new copy-paste examples in the README always use the canonical `DailybotHQ/ai-diff-reviewer` path. The **Marketplace listing slug** is `ai-diff-reviewer`, derived from the `action.yml` `name:` field — matches the repo slug exactly. Vendor attribution is handled by GitHub automatically via the `author:` field (`DailybotHQ`) — the Marketplace tile renders "by DailybotHQ" beneath the title, so we do NOT embed "Dailybot" in the `name:` field. See Rule #9 for the naming rule, and the [Marketplace rename decision log](docs/STANDARDS.md#marketplace-rename-decision-log) for the full chronology.
+
+---
+
+## Working principles
+
+Work with autonomy, ownership, and sound judgment. Pursue excellence through
+correctness, clarity, simplicity, and verified completion.
+
+- **Own the outcome.** Carry authorized work through investigation, execution,
+  and appropriate validation. Continue until the requested outcome is complete
+  or a concrete blocker prevents further progress.
+- **Be resourceful before asking.** Inspect available code, documentation,
+  tools, and prior decisions. Resolve questions you can answer through
+  reasonable investigation instead of transferring that work to the user.
+- **Make routine decisions independently.** Choose sensible approaches within
+  the authorized scope. State consequential assumptions. Avoid confirmation
+  requests for routine steps or actions already authorized.
+- **Ask when judgment or authorization is missing.** Consult the user when
+  essential information is unavailable, a material decision cannot be inferred
+  reliably, or an action requires approval not already granted. Bring the
+  investigation, relevant options, and your recommendation.
+- **Make approvals concrete.** Complete authorized preparation before asking
+  for approval. Present a reviewable result and identify the action requiring
+  approval and why it requires it.
+- **Work through obstacles.** Investigate failures and attempt reasonable
+  recovery within scope. Continue independent authorized work when possible.
+  Respect applicable stop conditions; escalate when progress requires user
+  input or an external change.
+- **Respect intent and scope.** Analysis requests remain analysis. Propose
+  broader improvements separately unless already authorized. Preserve the
+  user's existing work, decisions, and repository-specific approval rules.
+- **Apply proportionate rigor.** Address underlying causes and favor
+  maintainable solutions. Match investigation, validation, and polish to the
+  task's impact. Avoid unnecessary complexity and unrelated changes.
+- **Communicate directly and precisely.** Lead with the result or decision.
+  Explain consequential tradeoffs concisely. Distinguish verified facts,
+  assumptions, and unresolved uncertainty.
+- **Verify before declaring completion.** Review the result against the
+  request, perform appropriate checks, and fix issues within scope. Report
+  what was validated and any remaining limitations. Never claim actions,
+  checks, or outcomes that did not occur.
 
 ---
 
@@ -43,7 +84,7 @@ The product name in user-facing strings is **"AI Diff Reviewer"** (capitalised e
 - **Python 3.10+ standard library only.** No `requirements.txt`, no `pyproject.toml`, no virtualenv. Every dependency is a supply-chain question for every consumer.
 - **Composite GitHub Action** — not Docker, not Node. The runtime is whatever Python ships with `ubuntu-latest`.
 - **Single source file** for the runtime: `scripts/reviewer.py`. The simplicity is the feature.
-- **Provider abstraction** for future LLM providers; today only Anthropic ships.
+- **Runner × backend abstraction.** Six runners (`anthropic`, `openai` in-process; `claude-code`, `cursor`, `codex`, `grok` CLIs) and an `EndpointProfile` resolved from the optional `api-base` input (Anthropic, OpenAI, Azure Foundry, xAI, Z.ai, custom). Every backend URL comes from `resolve_endpoint_profile`; empty `api-base` keeps each runner byte-identical to earlier releases.
 
 ---
 
@@ -169,6 +210,8 @@ Whenever you change runtime behaviour:
 - `docs/STRICTNESS.md` / `PROMPTS.md` / `PROVIDERS.md` → update the section that covers the area you touched.
 - `examples/` → add an example if you added an input that has a non-trivial usage pattern.
 - `skills/ai-diff-reviewer/setup/reference.md` → update if `action.yml` inputs, defaults, or descriptions changed (this file is the local companion skill's reference manual; drift breaks the "any agent can answer setup questions" promise).
+- `examples/README.md` → add a row for every new `examples/*.yml` (the index is checked by script against the files on disk).
+- `skills/**/SKILL.md` frontmatter → `description` ≤ 1,024 characters and `name` ≤ 64 (Open Agent Skills limits; `scripts/validate-frontmatter.py` enforces both in CI — hosts such as Pi warn on longer descriptions). Put trigger catalogues in the body, not the frontmatter.
 - `AGENTS.md` (this file) → update the "Critical Rules" or "DO/DON'T" sections if you change a project standard.
 
 ### 8. SemVer for Releases (MANDATORY)
@@ -187,17 +230,9 @@ The current values are:
 
 **Repo slug ≠ Marketplace slug.** The git repo lives at `DailybotHQ/ai-diff-reviewer` and copy-paste examples pin against that path (`uses: DailybotHQ/ai-diff-reviewer@v2`). The Marketplace listing is a separate slug derived from `name:` — currently `ai-diff-reviewer`. The two are decoupled by design: consumers see the friendly name in Marketplace search; their workflows keep using the stable repo path.
 
-### Rename decision log (chronological)
+The [Marketplace rename decision log](docs/STANDARDS.md#marketplace-rename-decision-log) records the release history and rationale.
 
-1. **v1.0.0 – v1.2.0:** initial `name: 'AI PR Reviewer'` (slug `ai-pr-reviewer`, repo `DailybotHQ/ai-pr-reviewer`) — assumed free based on Marketplace search.
-2. **v1.2.1:** first publish attempt failed. Misdiagnosed the collision (thought it was against the `ai-pull-request-reviewer` full-form slug owned by `appchoose/ai-pr-review`), set defensive `name: 'Dailybot AI PR Reviewer'` (slug `dailybot-ai-pr-reviewer`) as a vendor-prefix workaround.
-3. **v1.3.0:** re-checked Marketplace listing search — `ai-pr-reviewer` appeared free among Marketplace slugs. Reverted the prefix to `'AI PR Reviewer'` for cleaner OSS-community positioning. Repo still `DailybotHQ/ai-pr-reviewer`.
-4. **v1.5.0 (current, 2026-07-14):** second publish attempt failed with the correct diagnosis this time — GitHub's Marketplace name-uniqueness rule includes `user or organization name`, and the org `github.com/ai-pr-reviewer` (created 2024-01-12, 0 public repos, name-squatting) blocks the slug at the org-namespace level, not the Marketplace-listing level. Two coordinated renames:
-   - **`action.yml` `name:`** — `'AI PR Reviewer'` → `'AI Diff Reviewer'` (slug `ai-diff-reviewer`, verified free at both the Marketplace and org-namespace levels).
-   - **GitHub repo** — `DailybotHQ/ai-pr-reviewer` → `DailybotHQ/ai-diff-reviewer`. So the repo slug now matches the Marketplace slug exactly. GitHub's permanent 301 redirect on renamed repos keeps `uses: DailybotHQ/ai-pr-reviewer@v1` pins working for all existing consumers — no migration required.
-   - Rationale for the specific name: "AI Diff Reviewer" is more accurate than "AI PR Reviewer" — this action reviews the `git diff origin/<base>...HEAD` specifically, not the PR envelope (labels, description, metadata). The vendor prefix stays OFF: attribution is auto-rendered by GitHub via `author: DailybotHQ` in the listing footer, and OSS positioning is stronger without a brand prefix.
-
-**Rule going forward:** do NOT rename this again unless there's a similarly load-bearing reason (Marketplace publish blocker, trademark issue). The name `'AI Diff Reviewer'` and the repo slug `DailybotHQ/ai-diff-reviewer` are now the stable public identity. Do not re-add the `Dailybot`-prefix (see v1.2.1 above for why it was a bad idea both times).
+**Rule going forward:** do NOT rename this again unless there's a similarly load-bearing reason (Marketplace publish blocker, trademark issue). The name `'AI Diff Reviewer'` and the repo slug `DailybotHQ/ai-diff-reviewer` are now the stable public identity. Do not re-add the `Dailybot`-prefix (see the [rename decision log](docs/STANDARDS.md#marketplace-rename-decision-log) for the rationale).
 
 ### 10. Dogfooding is Required
 
@@ -235,55 +270,44 @@ Defined in [.agents/commands/](.agents/commands/). When invoked, look up the pro
 | `/dwp-resume` | Reconstruct state and continue an interrupted plan. |
 | `/dwp-status` | Report progress on a plan without making changes. |
 | `/dwp-verify` | Objective pass/fail conformance report against the DWP spec. |
+| `/dwp-upgrade` | Check for a newer DeepWorkPlan skill; read-only until consent, then installs the accepted tag and re-onboards. |
 | `/skill-create` | Author or update a reusable skill under `.agents/skills/`. |
 | `/agent-create` | Author or update a sub-agent persona under `.agents/agents/`. |
 
-The eight `dwp-*` / `skill-create` / `agent-create` entries are thin delegators to the installed `deepworkplan` skill at [`.agents/skills/deepworkplan/`](.agents/skills/deepworkplan/) — see the [Deep Work Plan](#deep-work-plan) section below.
+The nine `dwp-*` / `skill-create` / `agent-create` entries are thin delegators to the installed `deepworkplan` skill at [`.agents/skills/deepworkplan/`](.agents/skills/deepworkplan/) — see the [Deep Work Plan](#deep-work-plan) section below.
 
 ---
 
 ## Deep Work Plan
 
-This repository ships the **Deep Work Plan (DWP)** methodology as an installed skill so any AI agent can plan, execute, and verify structured engineering work here. DWP rests on two pillars: **spec-driven development** (the plan is the spec — atomic tasks with binary validation gates) and **harness engineering** (the repository itself is the harness: `AGENTS.md`, `docs/`, `.agents/` kit, and the gitignored `.dwp/` state layer).
+This repository ships the **Deep Work Plan (DWP)** methodology as an installed skill so any AI agent can plan, execute, and verify structured engineering work here. DWP rests on two pillars: **spec-driven development** (the plan is the spec — atomic tasks with binary validation gates) and **harness engineering** (the repository itself is the harness: `AGENTS.md`, `docs/`, `.agents/` kit, and the gitignored `.dwp/` state layer). DWP standard: 5.0.0 (onboarded 2026-07-04; upgraded 2026-09-13; skill 5.3.0).
 
-### The eight sub-skills
+### Deep Work Plans — invocation
 
-Installed at [.agents/skills/deepworkplan/](.agents/skills/deepworkplan/):
+Structured work runs through the local DWP flows (`.agents/commands/dwp-*` delegators; the flows live in `.agents/skills/deepworkplan/` — discovery is local, no network service is consulted):
 
-| Sub-skill | Purpose |
+| Intent | Route |
 |---|---|
-| `create` | Decompose a goal into a numbered, sequential Deep Work Plan with per-task validation gates. |
-| `execute` | Run a plan task by task, checking each gate, updating progress. |
-| `refine` | Modify a plan (add, remove, reorder tasks) while preserving completed work. |
-| `resume` | Reconstruct state and continue an interrupted plan across sessions or agents. |
-| `status` | Report progress without making changes. |
-| `verify` | Emit an objective CONFORMANT / NOT CONFORMANT verdict against the DWP spec's Conformance document. |
-| `onboard` | Make a repository AI-first (reasoned analysis + non-destructive generation). |
-| `author` | Author or evolve this repo's own skills, agents, and commands. |
+| "plan this work", "create a plan" | `/dwp-create` |
+| "execute / run the plan" | `/dwp-execute` |
+| "modify the plan", "change the scope", "promote Lite→Full" | `/dwp-refine` |
+| "continue / resume the interrupted plan" | `/dwp-resume` |
+| "plan status", "what's left" | `/dwp-status` (read-only) |
+| "verify the repo / the plan" | `/dwp-verify` (read-only) |
+| "upgrade the DWP skill / harness" | `/dwp-upgrade` (read-only until consent; then installs the accepted tag and re-onboards) |
+| ordinary direct edit ("fix this", "rename that") | done directly — never silently becomes a plan |
 
-The `dwp-*`, `skill-create`, and `agent-create` slash commands in [.agents/commands/](.agents/commands/) are thin delegators to these — the skill is the single source of truth.
+Hosts without slash commands invoke the same flows by name (`#deepworkplan-create` or plain text). `trust`/`auto` authorizes unattended continuation within the requested flow; it is not a flow selector, and read-only routes stay read-only.
+
+The [DeepWorkPlan sub-skill reference](docs/AI_AGENT_ONBOARDING.md#deepworkplan-sub-skills) describes the nine flows.
 
 ### Where plans live
 
-Deep Work Plan outputs — plans, drafts, and onboarding recon/report — live under **`.dwp/`** at the repo root. That directory is **gitignored** (see [`.gitignore`](.gitignore)); plans are working artifacts, not tracked source.
-
-```
-.dwp/
-├── plans/       ← PLAN_{name}/ directories (executing/executed plans)
-├── drafts/      ← {name}_draft_refined.md (created by /dwp-create)
-└── onboard/     ← RECON.md and REPORT.md from /deepworkplan-onboard
-```
-
-Full path convention: [.agents/skills/deepworkplan/shared/dwp-paths.md](.agents/skills/deepworkplan/shared/dwp-paths.md).
+Deep Work Plan outputs — `plans/` (`PLAN_{name}/` directories) and `onboard/` (RECON.md + REPORT.md) — live under **`.dwp/`** at the repo root. That directory is **gitignored** (see [`.gitignore`](.gitignore)); plans are working artifacts, not tracked source. Full path convention: [.agents/skills/deepworkplan/shared/dwp-paths.md](.agents/skills/deepworkplan/shared/dwp-paths.md).
 
 ### When to reach for it
 
-- The task has multiple valid approaches, touches many files, or needs to survive across sessions → `/dwp-create` first, then `/dwp-execute`.
-- A previous plan was interrupted → `/dwp-resume`.
-- Before wrapping onboarding or a large change → `/dwp-verify` gives an objective conformance gate.
-- Small, obvious edits → don't bother; work directly.
-
-DWP is complementary to the repo's existing `/release`, `/prompt-test`, and `/add-provider` skills — those remain the right tools for their specific workflows. DWP is for **novel** work that needs decomposition and gates.
+Reach for a plan when work has multiple valid approaches, touches many files, or must survive across sessions (`/dwp-create` → `/dwp-execute`; `/dwp-resume` if interrupted; `/dwp-verify` for an objective gate). Small, obvious edits → work directly. DWP is complementary to the repo's existing `/release`, `/prompt-test`, and `/add-provider` skills — those remain the right tools for their specific workflows. DWP is for **novel** work that needs decomposition and gates.
 
 ### Dailybot reporting (optional, non-blocking)
 
@@ -310,13 +334,13 @@ Every event is emitted via the dailybot `report` sub-skill (`dailybot agent upda
 
 This repo has the **AI Diff Reviewer addon** enabled in **Flow B** (local skill + CI Action). Detection for DWP `create` / `execute` is: vendored skill at [`.agents/skills/ai-diff-reviewer/`](.agents/skills/ai-diff-reviewer/) **plus** [`.review/extension.md`](.review/extension.md). Spec: [`.agents/skills/deepworkplan/addons/ai-diff-reviewer/SPEC.md`](.agents/skills/deepworkplan/addons/ai-diff-reviewer/SPEC.md).
 
-**Security Review augmentation (both flows).** When a Deep Work Plan reaches the mandatory Security Review task, agents also run the upstream parent default flow ("Review my current branch" / `/ai-diff-reviewer`), append verdict + findings under `## AI Diff Reviewer local review` in that plan's `analysis_results/SECURITY_REVIEW.md`, and treat open `critical` findings as SR blockers until fixed or explicitly accepted. Soft-fail (warn once, continue the base SR) only if the skill/extension is missing or the local review invocation errors — an unset CI provider secret must **not** skip the local pass.
+**Final Review security-pass augmentation (both flows).** Every 2.3.0+ plan ends in a single mandatory Final Review; its security pass runs the upstream parent default flow ("Review my current branch" / `/ai-diff-reviewer`), appends verdict + findings under `## AI Diff Reviewer local review` in `analysis_results/SECURITY_REVIEW.md`, and treats open `critical` findings as Final Review blockers until fixed or explicitly accepted. A missing vendored skill or extension file is **not** a silent skip — record a `local reviewer not installed` finding (installation is onboarding-only). Soft-fail (warn once, continue the security pass) applies only to invocation errors (network down, upstream skill error) — an unset CI provider secret must **not** skip the local pass.
 
-**CI surface (this repo).** Consumer Flow B normally installs `.github/workflows/pr-review.yml` via the upstream `setup` sub-skill. This repository **is** the Action, so the dual-surface CI gate is the dogfood workflow [`.github/workflows/self-review.yml`](.github/workflows/self-review.yml) (`uses: ./` against the PR HEAD, label-gated on `ready`, stable gate job). Do **not** add a second consumer-style `pr-review.yml` here — that would double-review every PR. Provider secrets for the dogfood matrix: at least one of `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `CURSOR_API_KEY`, or `OPENAI_API_KEY` (see `self-review.yml`).
+**CI surface (this repo).** Consumer Flow B normally installs `.github/workflows/pr-review.yml` via the upstream `setup` sub-skill. This repository **is** the Action, so the dual-surface CI gate is the dogfood workflow [`.github/workflows/self-review.yml`](.github/workflows/self-review.yml) (`uses: ./` against the PR HEAD, label-gated on `ready`, stable gate job). Do **not** add a second consumer-style `pr-review.yml` here — that would double-review every PR. Provider secrets for the dogfood matrix: at least one of `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `CURSOR_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY` (Grok), `ZAI_CODING_API_KEY` (Claude Code on Z.ai GLM via `api-base`), or `AZURE_OPENAI_API_KEY` + the repo variables `AZURE_OPENAI_BASE_URL` / `AZURE_OPENAI_MODEL_DAILY` (Codex on Azure Foundry); the in-process `openai` leg runs whenever `OPENAI_API_KEY` exists (opt out with the repo variable `SELF_REVIEW_OPENAI_CHAT=false`). Legs whose secret is absent are simply not in the matrix (see `self-review.yml`).
 
 **Optional post-CI companion (Flow B).** After a plan's PR has been pushed and self-review has posted, developers MAY invoke the upstream `apply-review` sub-skill to walk CI findings per-finding (apply / defer / skip) with explicit consent. Read-only by default; never commits or pushes. This is an available option during `/dwp-execute`, not a plan task file.
 
-**Vendor-neutral reminder.** The core DWP methodology has zero dependency on this product. Declining the addon elsewhere still yields a fully AI-first repo; enabling it here is dogfood + SR quality for plans that touch this codebase.
+**Vendor-neutral reminder.** The core DWP methodology has zero dependency on this product. Declining the local reviewer elsewhere is allowed but recorded as a declared exception and reported non-conformant on that point until installed; enabling it here is dogfood + Final Review quality for plans that touch this codebase.
 
 ---
 
@@ -368,8 +392,9 @@ The four in-house skills (`release`, `prompt-test`, `add-provider`, plus the age
 10. Add a new top-level `action.yml` input "just to support a one-off use case" — every input is a long-lived public contract.
 11. Hardcode anything that should be a constant — magic numbers, paths, severity ranks. The top of `scripts/reviewer.py` is the canonical place for runtime constants.
 12. Edit content in `.claude/...` or `CLAUDE.md` — both are symlinks. Edit the canonical paths under `.agents/...` and `AGENTS.md`.
-13. Spell the action name "AI-Diff-Reviewer" / "AIDR" / "AI/Diff Reviewer" / "AI PR Reviewer" (the old name) in user-facing copy — the canonical user-facing capitalisation is **"AI Diff Reviewer"**. The git repo slug is `ai-diff-reviewer` (renamed 2026-07-14; the old `ai-pr-reviewer` URL still resolves via GitHub's permanent 301 redirect), and the Marketplace listing slug is `ai-diff-reviewer` (derived from `action.yml` `name:`) — they match exactly. Rule #9 has the full rename decision log.
+13. Spell the action name "AI-Diff-Reviewer" / "AIDR" / "AI/Diff Reviewer" / "AI PR Reviewer" (the old name) in user-facing copy — the canonical user-facing capitalisation is **"AI Diff Reviewer"**. The git repo slug is `ai-diff-reviewer` (renamed 2026-07-14; the old `ai-pr-reviewer` URL still resolves via GitHub's permanent 301 redirect), and the Marketplace listing slug is `ai-diff-reviewer` (derived from `action.yml` `name:`) — they match exactly. Rule #9 has the naming rule; the full chronology is in the [Marketplace rename decision log](docs/STANDARDS.md#marketplace-rename-decision-log).
 14. Hand-edit `.agents/skills/ai-diff-reviewer/**` on a feature branch — that's the vendored snapshot of the released version, refreshed automatically by `auto-release.yml` Step 3.5 after each release. Work on the source-of-truth copy at `skills/ai-diff-reviewer/**` instead. Rule #10 has the two-layer dogfooding model.
+15. Build a backend URL outside `resolve_endpoint_profile()` / `EndpointProfile.base_url`, read `AIPRR_API_BASE` directly in a provider, or forward a credential to a CLI under a name it does not need — `docs/SECURITY.md § "Custom endpoints"` is the contract (`.review/extension.md` flags all three as `critical`).
 
 ### DO
 
@@ -384,6 +409,7 @@ The four in-house skills (`release`, `prompt-test`, `add-provider`, plus the age
 9. Verify the change via `.github/workflows/self-review.yml` running on the PR.
 10. Edit the canonical `AGENTS.md` / `.agents/...` paths.
 11. Use **"AI Diff Reviewer"** for product copy (Marketplace-facing), `DailybotHQ/ai-diff-reviewer` for the canonical repo slug (the old `DailybotHQ/ai-pr-reviewer` still redirects for back-compat), `ai-diff-reviewer` for the Marketplace slug (derived from `action.yml`), and `AIPRR_` for the env-var prefix (private, unchanged).
+12. Follow the runner/backend checklist when adding one (`docs/PROVIDERS.md § "Adding a runner or backend"`): endpoint profile → provider class → `DEFAULT_MODELS` + tier row → `action.yml` install step (CLI only, skip-if-present) → `cli-install-smoke` entry → `self-review.yml` leg → `examples/provider-<id>.yml` + index row → README runners table + inputs row → `setup/reference.md` + wizard Q1 table → `docs/SECURITY.md` credential lanes → CHANGELOG.
 
 ---
 
@@ -420,25 +446,7 @@ The four in-house skills (`release`, `prompt-test`, `add-provider`, plus the age
 - <risk 1, or "None — content-only change">
 ```
 
-Example:
-
-```
-feat(provider): add OpenAI provider
-
-## Summary
-First non-Anthropic provider — translates Anthropic-shape messages and
-tool calls to OpenAI's chat-completions schema at the boundary so the
-rest of the runtime is unchanged.
-
-## Change Log
-- New OpenAIProvider class with tool-call translation in both directions
-- New default model entry: openai → gpt-4o
-- New optional input api-base for self-hosted OpenAI-compatible endpoints
-
-## Risks
-- Translation layer is the only meaningful new surface; covered by smoke
-  test on PR #42 (provider: openai). No change to existing Anthropic path.
-```
+See the [Conventional Commit example](docs/STANDARDS.md#example-commit-message) in `STANDARDS.md § Commits` for a complete message.
 
 ---
 
@@ -467,8 +475,6 @@ This repository **dogfoods itself**: every PR is reviewed by the action it ships
 
 Full workflow + ready-to-copy GraphQL query: [docs/PR_REVIEW_WORKFLOW.md](docs/PR_REVIEW_WORKFLOW.md).
 
----
-
 ## Small-Batch Delivery
 
 For larger initiatives (multi-provider rollout, prompt overhaul, output schema redesign):
@@ -479,8 +485,6 @@ For larger initiatives (multi-provider rollout, prompt overhaul, output schema r
 4. Verify each batch before starting the next.
 5. Keep each batch publishable as a `vX.Y.Z` release behind clear changelog entries.
 
----
-
 ## Temporary Files (tmp/)
 
 The `tmp/` folder at project root is **git-ignored** and available for scratch
@@ -490,8 +494,6 @@ write to `tmp/` without affecting the repository.
 **Nothing inside `tmp/` is ever tracked or committed** — the whole folder is
 ignored by git. Write freely (scratch notes, inter-agent prompts, data exports,
 query results); it will never show up in `git status` or a diff.
-
----
 
 ## License
 

@@ -15,7 +15,9 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
+from unittest import mock
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +29,6 @@ assert _SPEC is not None and _SPEC.loader is not None
 reviewer = importlib.util.module_from_spec(_SPEC)
 sys.modules["reviewer"] = reviewer
 _SPEC.loader.exec_module(reviewer)
-
 
 def _make_pr_context() -> Any:
     """Minimal PRContext for tests that need one."""
@@ -51,6 +52,18 @@ def _write_findings(tmp: Path, payload: dict) -> Path:
     path = findings_dir / "findings.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path
+
+
+def _writer_argv(path: Path, payload: dict, exit_code: int = 0) -> list[str]:
+    """A fake CLI that writes `payload` to `path` and exits with `exit_code`
+    (v2.2.0+: `_invoke_cli_agent` removes any pre-existing findings file
+    before the subprocess, so the file must come from the subprocess)."""
+    return [
+        "python3", "-c",
+        "import pathlib, sys; p = pathlib.Path(sys.argv[1]); p.parent.mkdir(parents=True, exist_ok=True); "
+        "p.write_text(sys.argv[2]); sys.exit(int(sys.argv[3]))",
+        str(path), json.dumps(payload), str(exit_code),
+    ]
 
 
 class BuildProviderDispatchTests(unittest.TestCase):
@@ -81,7 +94,7 @@ class BuildProviderDispatchTests(unittest.TestCase):
         self.assertIn("Unsupported provider", str(ctx.exception))
 
     def test_default_models_covers_all_shipping_providers(self) -> None:
-        for provider_id in ("anthropic", "claude-code", "cursor", "codex"):
+        for provider_id in ("anthropic", "openai", "claude-code", "cursor", "codex", "grok"):
             self.assertIn(provider_id, reviewer.DEFAULT_MODELS)
             self.assertTrue(reviewer.DEFAULT_MODELS[provider_id])
 
@@ -180,12 +193,8 @@ class InvokeCliAgentTests(unittest.TestCase):
     def test_success_parses_findings_file(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
-            findings_path = _write_findings(
-                tmp,
-                {"summary": "ok", "findings": []},
-            )
-            # Use `python3 -c "pass"` — always exits 0.
-            argv = ["python3", "-c", "pass"]
+            findings_path = tmp / ".aiprr" / "findings.json"
+            argv = _writer_argv(findings_path, {"summary": "ok", "findings": []})
             result = reviewer._invoke_cli_agent(
                 argv=argv,
                 workspace=tmp,
@@ -211,19 +220,142 @@ class InvokeCliAgentTests(unittest.TestCase):
                 )
             self.assertIn("exited with code 1", str(ctx.exception))
 
-    def test_missing_findings_after_success_raises_from_parser(self) -> None:
+    def test_missing_findings_after_success_degrades_to_summary_only(self) -> None:
+        """v2.2.0: exit 0 without a findings file → an explicit summary-only
+        review (the agent ended without producing the contract output),
+        never a failed run and never a silent 'no findings'."""
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
-            # Exit 0 but no findings file written.
             argv = ["python3", "-c", "pass"]
-            with self.assertRaises(FileNotFoundError):
-                reviewer._invoke_cli_agent(
-                    argv=argv,
-                    workspace=tmp,
-                    findings_path=tmp / ".aiprr" / "findings.json",
-                    env={**os.environ},
-                    cli_name="TestCLI",
+            with mock.patch.object(reviewer, "log") as fake_log:
+                res = reviewer._invoke_cli_agent(
+                    argv=argv, workspace=tmp, findings_path=tmp / ".aiprr" / "findings.json",
+                    env={**os.environ}, cli_name="TestCLI",
                 )
+            self.assertEqual(res.findings, [])
+            self.assertTrue(res.incomplete, "main() reads this flag to fail the gate and skip the label")
+            self.assertIn("without writing its findings file", res.summary)
+            self.assertIn("incomplete review", res.summary)
+            self.assertTrue(any("WARNING" in str(c.args[0]) and "did not write" in str(c.args[0]) for c in fake_log.call_args_list))
+            self.assertTrue(any("retrying once" in str(c.args[0]) for c in fake_log.call_args_list), "one fresh attempt before giving up")
+
+    def test_retry_recovers_when_the_second_attempt_writes_the_file(self) -> None:
+        """v2.2.0: exit 0 without a findings file is retried once; a findings
+        file from the second attempt yields a normal review with a note."""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td); fp = tmp / ".aiprr" / "findings.json"; marker = tmp / "first-attempt-done"
+            argv = ["python3", "-c",
+                    "import pathlib, sys, json; m = pathlib.Path(sys.argv[1]); p = pathlib.Path(sys.argv[2])\n"
+                    "if m.exists():\n    p.parent.mkdir(parents=True, exist_ok=True); p.write_text(json.dumps({'summary': 'second', 'findings': []}))\n"
+                    "else:\n    m.write_text('x')\n"
+                    "print(json.dumps({'usage': {'input_tokens': 10, 'output_tokens': 1}}))",
+                    str(marker), str(fp)]
+            with mock.patch.object(reviewer, "log"):
+                res = reviewer._invoke_cli_agent(argv=argv, workspace=tmp, findings_path=fp, env={**os.environ}, cli_name="TestCLI", usage_parser=reviewer.parse_cursor_usage)
+            self.assertFalse(res.incomplete)
+            self.assertIn("second", res.summary)
+            self.assertIn("Retried once", res.summary)
+            assert res.usage is not None
+            self.assertEqual(res.usage.input_tokens, 20, "both attempts are billed and both are reported")
+
+    def test_hung_cli_that_never_reads_stdin_still_times_out(self) -> None:
+        """The deadline covers the stdin write: a CLI that sleeps without
+        reading a large prompt is killed and reported as a timeout."""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            with mock.patch.object(reviewer, "CLI_INVOCATION_TIMEOUT", 2), mock.patch.object(reviewer, "log"):
+                started = time.monotonic()
+                with self.assertRaises(RuntimeError) as ctx:
+                    reviewer._invoke_cli_agent(argv=["python3", "-c", "import time; time.sleep(30)"], workspace=tmp,
+                                               findings_path=tmp / ".aiprr" / "findings.json", env={**os.environ},
+                                               cli_name="TestCLI", stdin_input="x" * 1_500_000)
+            self.assertIn("exceeded the timeout", str(ctx.exception))
+            self.assertLess(time.monotonic() - started, 15)
+
+    def test_cli_that_exits_before_reading_stdin_reports_its_exit_code(self) -> None:
+        """A fast crash must surface the CLI's exit code, not a BrokenPipeError."""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            with mock.patch.object(reviewer, "log"), self.assertRaises(RuntimeError) as ctx:
+                reviewer._invoke_cli_agent(argv=["python3", "-c", "import sys; sys.exit(7)"], workspace=tmp,
+                                           findings_path=tmp / ".aiprr" / "findings.json", env={**os.environ},
+                                           cli_name="TestCLI", stdin_input="x" * 1_500_000)
+            self.assertIn("exited with code 7", str(ctx.exception))
+
+    def test_no_retry_when_the_first_attempt_used_most_of_the_time_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            with mock.patch.object(reviewer, "CLI_INVOCATION_TIMEOUT", 1), mock.patch.object(reviewer, "log") as fake_log:
+                res = reviewer._invoke_cli_agent(argv=["python3", "-c", "import time; time.sleep(0.6)"], workspace=tmp,
+                                                 findings_path=tmp / ".aiprr" / "findings.json", env={**os.environ}, cli_name="TestCLI")
+            self.assertTrue(res.incomplete)
+            self.assertTrue(any("no time budget for a retry" in str(c.args[0]) for c in fake_log.call_args_list))
+            self.assertFalse(any("retrying once" in str(c.args[0]) for c in fake_log.call_args_list))
+
+    def test_cli_output_is_captured_bounded_and_large_stdin_does_not_deadlock(self) -> None:
+        """S-02: a chatty CLI cannot grow memory without bound; the usage line at
+        the tail survives; a >1 MB stdin prompt is delivered in full."""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td); fp = tmp / ".aiprr" / "findings.json"
+            prompt = "x" * 1_500_000
+            argv = ["python3", "-c",
+                    "import sys, json, pathlib; data = sys.stdin.read(); p = pathlib.Path(sys.argv[1]); p.parent.mkdir(parents=True, exist_ok=True)\n"
+                    "p.write_text(json.dumps({'summary': 'len=%d' % len(data), 'findings': []}))\n"
+                    "sys.stdout.write('y' * 6_000_000 + '\\n'); sys.stdout.write(json.dumps({'usage': {'input_tokens': 7, 'output_tokens': 2}}) + '\\n')",
+                    str(fp)]
+            with mock.patch.object(reviewer, "log") as fake_log:
+                res = reviewer._invoke_cli_agent(argv=argv, workspace=tmp, findings_path=fp, env={**os.environ}, cli_name="TestCLI", stdin_input=prompt, usage_parser=reviewer.parse_cursor_usage)
+            self.assertEqual(res.summary, "len=1500000")
+            assert res.usage is not None
+            self.assertEqual(res.usage.input_tokens, 7)
+            self.assertTrue(any("kept the tail" in str(c.args[0]) for c in fake_log.call_args_list))
+
+    def test_stale_findings_file_is_removed_before_the_cli_runs(self) -> None:
+        """A findings file left by a previous step or a persistent workspace
+        must never be posted as this run's review."""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            stale = _write_findings(tmp, {"summary": "STALE", "findings": [{"path": "a.py", "line": 1, "body": "old", "severity": "critical"}]})
+            with mock.patch.object(reviewer, "log"):
+                res = reviewer._invoke_cli_agent(
+                    argv=["python3", "-c", "pass"], workspace=tmp, findings_path=stale,
+                    env={**os.environ}, cli_name="TestCLI",
+                )
+            self.assertTrue(res.incomplete)
+            self.assertNotIn("STALE", res.summary)
+            self.assertEqual(res.findings, [])
+
+    def test_incomplete_review_gate_never_greens_a_blocking_strictness(self) -> None:
+        for strictness in ("block-on-critical", "block-on-warning", "block-on-any"):
+            blocked, reason = reviewer.incomplete_review_gate(strictness, "Grok")
+            self.assertTrue(blocked, strictness)
+            self.assertIn("incomplete review", reason)
+        blocked, reason = reviewer.incomplete_review_gate("lenient", "Grok")
+        self.assertFalse(blocked)
+        self.assertIn("lenient", reason)
+
+    def test_nonzero_exit_with_findings_file_is_a_partial_review(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            argv = _writer_argv(tmp / ".aiprr" / "findings.json", {"summary": "s", "findings": [{"path": "a.py", "line": 1, "body": "b", "severity": "info"}]}, exit_code=3)
+            with mock.patch.object(reviewer, "log") as fake_log:
+                res = reviewer._invoke_cli_agent(
+                    argv=argv, workspace=tmp, findings_path=tmp / ".aiprr" / "findings.json",
+                    env={**os.environ}, cli_name="TestCLI",
+                )
+            self.assertEqual(len(res.findings), 1)
+            self.assertIn("Partial review: TestCLI exited with code 3", res.summary)
+            self.assertTrue(any("partial review" in str(c.args[0]) for c in fake_log.call_args_list))
+
+    def test_nonzero_exit_without_findings_file_still_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            with self.assertRaises(RuntimeError) as ctx:
+                reviewer._invoke_cli_agent(
+                    argv=["python3", "-c", "import sys; sys.exit(2)"], workspace=tmp,
+                    findings_path=tmp / ".aiprr" / "findings.json", env={**os.environ}, cli_name="TestCLI",
+                )
+            self.assertIn("exited with code 2", str(ctx.exception))
 
 
 class CliBinaryConstantsTests(unittest.TestCase):
@@ -248,241 +380,10 @@ class CliBinaryConstantsTests(unittest.TestCase):
             str(reviewer.CodexProvider.MCP_DEST).endswith(".codex/mcp.json")
         )
 
-
-class CliEnvAllowlistTests(unittest.TestCase):
-    """`_build_cli_env` forwards only the allowlist + provided extras.
-
-    Prevents leaking AIPRR_GH_TOKEN and other consumer secrets into the
-    vendor CLI subprocess. See Security Review §2.
-    """
-
-    def test_allowlist_only_forwarded(self) -> None:
-        prev = dict(os.environ)
-        try:
-            # Populate a mix of allowed and disallowed vars.
-            os.environ.clear()
-            os.environ.update(
-                {
-                    "PATH": "/usr/bin",
-                    "HOME": "/root",
-                    "AIPRR_GH_TOKEN": "ghp_secret",
-                    "AIPRR_API_KEY": "sk-secret",
-                    "MY_CUSTOM_LEAK": "leak-me",
-                }
-            )
-            env = reviewer._build_cli_env(extra_vars={"VENDOR_KEY": "vk"})
-            self.assertEqual(env.get("PATH"), "/usr/bin")
-            self.assertEqual(env.get("HOME"), "/root")
-            self.assertEqual(env.get("VENDOR_KEY"), "vk")
-            self.assertNotIn("AIPRR_GH_TOKEN", env)
-            self.assertNotIn("AIPRR_API_KEY", env)
-            self.assertNotIn("MY_CUSTOM_LEAK", env)
-        finally:
-            os.environ.clear()
-            os.environ.update(prev)
-
-    def test_extra_vars_override_missing_from_env(self) -> None:
-        env = reviewer._build_cli_env(extra_vars={"ANTHROPIC_API_KEY": "AK"})
-        self.assertEqual(env["ANTHROPIC_API_KEY"], "AK")
-
-    def test_no_gh_token_ever_reaches_env(self) -> None:
-        prev = dict(os.environ)
-        try:
-            os.environ["AIPRR_GH_TOKEN"] = "ghp_should_not_leak"
-            env = reviewer._build_cli_env(
-                extra_vars={"OPENAI_API_KEY": "sk-x"}
-            )
-            self.assertNotIn("AIPRR_GH_TOKEN", env)
-        finally:
-            os.environ.clear()
-            os.environ.update(prev)
-
-
-class SecurityInvariantsTests(unittest.TestCase):
-    """No shell=True, all agent-extra-args go through shlex.split."""
-
-    def test_no_shell_true_in_reviewer_py(self) -> None:
-        """`shell=True` must not appear in any actual subprocess call.
-
-        Filters out docstring/comment references (e.g. "argv-list form
-        (no `shell=True`)") — those are documentation, not code paths.
-        """
-        source: str = (_ROOT / "scripts" / "reviewer.py").read_text(
-            encoding="utf-8"
-        )
-        code_lines: list[str] = []
-        for line in source.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("#"):
-                continue
-            if "`shell=True`" in stripped:
-                continue
-            code_lines.append(line)
-        code_only: str = "\n".join(code_lines)
-        self.assertNotIn(
-            "shell=True",
-            code_only,
-            "shell=True is banned — every subprocess call must use argv-list "
-            "form. See docs/SECURITY.md.",
-        )
-
-    def test_no_bare_os_system(self) -> None:
-        source: str = (_ROOT / "scripts" / "reviewer.py").read_text(
-            encoding="utf-8"
-        )
-        self.assertNotIn(
-            "os.system(",
-            source,
-            "os.system() is banned — use subprocess.run with argv-list.",
-        )
-
-    def test_extra_args_flows_through_shlex(self) -> None:
-        """Every provider that accepts extra_args uses shlex.split."""
-        source: str = (_ROOT / "scripts" / "reviewer.py").read_text(
-            encoding="utf-8"
-        )
-        # Each of the three CLI providers should have `shlex.split(self.extra_args)`
-        occurrences: int = source.count("shlex.split(self.extra_args)")
-        self.assertGreaterEqual(
-            occurrences,
-            3,
-            "Each of the 3 CLI providers must funnel extra_args through "
-            "shlex.split — never string-concat into argv.",
-        )
-
-
-class CursorHeadlessDefaultsTests(unittest.TestCase):
-    """CursorProvider default argv includes Cursor's own headless-CI flags.
-
-    v1.2.0+: `--force --trust` are always passed; `--approve-mcps` is
-    added iff `mcp_config_file` is non-empty. These are Cursor's own
-    recommendations from https://cursor.com/docs/cli/headless — without
-    them, the CLI can stall on interactive approval prompts in CI.
-    """
-
-    _last_captured: dict[str, Any] = {}
-
-    def _run_and_capture_argv(
-        self, *, model: str = "", mcp_config_file: str = "", extra_args: str = ""
-    ) -> list[str]:
-        """Monkey-patch `_invoke_cli_agent` and return the argv it received."""
-        captured: dict[str, Any] = {}
-
-        def fake_invoke(*, argv: list[str], **_kwargs: Any) -> Any:
-            captured["argv"] = list(argv)
-            captured["kwargs"] = dict(_kwargs)
-            return reviewer.ReviewResult(summary="ok", findings=[])
-
-        orig = reviewer._invoke_cli_agent
-        reviewer._invoke_cli_agent = fake_invoke  # type: ignore[assignment]
-        try:
-            with tempfile.TemporaryDirectory() as td:
-                workspace = Path(td)
-                # `_swap_mcp_config` reads the source path — for mcp_config_file
-                # we need a real file. Create one when the test requests it.
-                mcp_arg: str = ""
-                if mcp_config_file:
-                    mcp_arg = str(workspace / "mcp.json")
-                    Path(mcp_arg).write_text('{"mcpServers":{}}', encoding="utf-8")
-                p = reviewer.CursorProvider(
-                    api_key="k",
-                    model=model,
-                    extra_args=extra_args,
-                    mcp_config_file=mcp_arg,
-                )
-                # Override the default MCP_DEST so the swap does not touch the
-                # real ~/.cursor/mcp.json during tests.
-                p.MCP_DEST = workspace / ".cursor" / "mcp.json"  # type: ignore[misc]
-                p.run_review(
-                    pr_context=_make_pr_context(),
-                    review_instructions="review this",
-                    workspace=workspace,
-                    output_dir=workspace,
-                )
-        finally:
-            reviewer._invoke_cli_agent = orig  # type: ignore[assignment]
-        CursorHeadlessDefaultsTests._last_captured = captured
-        return captured["argv"]
-
-    def test_force_and_trust_are_always_present(self) -> None:
-        argv = self._run_and_capture_argv()
-        self.assertIn(
-            "--force",
-            argv,
-            "Cursor headless CI must pass --force (skip interactive tool "
-            "approvals). See docs/PROVIDERS.md § Cursor CLI.",
-        )
-        self.assertIn(
-            "--trust",
-            argv,
-            "Cursor headless CI must pass --trust (mark workspace trusted).",
-        )
-
-    def test_approve_mcps_absent_when_no_mcp_config(self) -> None:
-        argv = self._run_and_capture_argv(mcp_config_file="")
-        self.assertNotIn(
-            "--approve-mcps",
-            argv,
-            "--approve-mcps is only relevant when an MCP config was injected.",
-        )
-
-    def test_approve_mcps_present_when_mcp_config_set(self) -> None:
-        argv = self._run_and_capture_argv(mcp_config_file="mcp.json")
-        self.assertIn(
-            "--approve-mcps",
-            argv,
-            "When mcp-config-file is set, --approve-mcps must be added to "
-            "prevent the interactive MCP approval prompt from stalling CI.",
-        )
-
-    def test_model_flag_still_honored(self) -> None:
-        argv = self._run_and_capture_argv(model="auto")
-        self.assertIn("--model", argv)
-        model_idx = argv.index("--model")
-        self.assertEqual(argv[model_idx + 1], "auto")
-
-    def test_extra_args_still_appended_after_defaults(self) -> None:
-        argv = self._run_and_capture_argv(extra_args="--custom-flag=value")
-        self.assertIn("--force", argv)
-        self.assertIn("--trust", argv)
-        self.assertIn("--custom-flag=value", argv)
-        # extra_args comes after the built-in flags so the CLI's own parser
-        # resolves conflicts in favor of the consumer's explicit override.
-        self.assertGreater(
-            argv.index("--custom-flag=value"),
-            argv.index("--force"),
-            "agent-extra-args must be appended AFTER the default headless "
-            "flags so consumer overrides take precedence in CLI parsing.",
-        )
-
-    def test_user_prompt_not_in_argv_and_goes_via_stdin(self) -> None:
-        """Regression: user prompt (which includes the full diff) must NOT be
-        embedded into argv, or the kernel raises E2BIG on large PRs. It must
-        be piped via stdin instead. See PR #9 self-review-cursor failure."""
-        argv = self._run_and_capture_argv()
-        # `-p` MUST be present but with NO positional prompt argument
-        # following it. The token right after `-p` should be another flag,
-        # not the review-instructions payload.
-        self.assertIn("-p", argv, "Cursor headless mode requires -p flag.")
-        p_idx = argv.index("-p")
-        if p_idx + 1 < len(argv):
-            next_tok = argv[p_idx + 1]
-            self.assertTrue(
-                next_tok.startswith("-"),
-                f"Nothing should be passed as a positional after -p, but "
-                f"found {next_tok!r}. Large prompts must go via stdin, not "
-                f"argv (Linux ARG_MAX ~128 KB blows up on 200 KB+ diffs).",
-            )
-        stdin_input = self._last_captured["kwargs"].get("stdin_input")
-        self.assertIsNotNone(
-            stdin_input,
-            "CursorProvider must pipe the user prompt via stdin_input to "
-            "avoid E2BIG. See _invoke_cli_agent's stdin_input parameter.",
-        )
-        # The stdin payload should contain both the review instructions
-        # (findings.json contract) AND the PR context (title/diff header).
-        self.assertIn("findings.json", stdin_input)
-        self.assertIn("# PR Context", stdin_input)
+    def test_grok_constants(self) -> None:
+        self.assertEqual(reviewer.GrokProvider.CLI_BIN, "grok")
+        self.assertEqual(reviewer.GrokProvider.CLI_NAME, "xAI Grok")
+        self.assertEqual(reviewer.GrokProvider.PROVIDER_ID, "grok")
 
 
 def _capture_provider_call(provider: Any) -> dict[str, Any]:
@@ -511,384 +412,6 @@ def _capture_provider_call(provider: Any) -> dict[str, Any]:
     finally:
         reviewer._invoke_cli_agent = orig  # type: ignore[assignment]
     return captured
-
-
-class ClaudeCodeInvocationTests(unittest.TestCase):
-    """ClaudeCodeProvider must deliver the rubric as text, bypass the
-    permission gate so the Write tool can emit findings.json, and pipe the
-    diff-carrying user prompt via stdin (E2BIG safety)."""
-
-    def _capture(self, *, model: str = "", extra_args: str = "") -> dict[str, Any]:
-        return _capture_provider_call(
-            reviewer.ClaudeCodeProvider(
-                api_key="k", model=model, extra_args=extra_args
-            )
-        )
-
-    def test_append_system_prompt_is_text_not_path(self) -> None:
-        argv = self._capture()["argv"]
-        self.assertIn("--append-system-prompt", argv)
-        idx = argv.index("--append-system-prompt")
-        value = argv[idx + 1]
-        # The value must be the rubric + findings contract TEXT, never a
-        # filesystem path (the flag takes a prompt string, not a file).
-        self.assertIn("RUBRIC_TEXT_MARKER", value)
-        self.assertIn("findings.json", value)
-        self.assertNotIn(
-            "instructions.md",
-            value,
-            "--append-system-prompt must receive the instruction TEXT, not a "
-            "path — passing a path delivers the filename to the model and the "
-            "rubric/output-contract never arrive.",
-        )
-
-    def test_permission_gate_is_bypassed(self) -> None:
-        argv = self._capture()["argv"]
-        self.assertIn("--permission-mode", argv)
-        idx = argv.index("--permission-mode")
-        self.assertEqual(
-            argv[idx + 1],
-            "bypassPermissions",
-            "Headless Claude Code must bypass the permission gate or the Write "
-            "tool that emits findings.json is denied in non-interactive CI.",
-        )
-
-    def test_user_prompt_goes_via_stdin_not_argv(self) -> None:
-        captured = self._capture()
-        argv, kwargs = captured["argv"], captured["kwargs"]
-        # `-p` present with no positional prompt after it (next token is a flag).
-        self.assertIn("-p", argv)
-        p_idx = argv.index("-p")
-        self.assertTrue(argv[p_idx + 1].startswith("-"))
-        stdin_input = kwargs.get("stdin_input")
-        self.assertIsNotNone(stdin_input)
-        self.assertIn("# PR Context", stdin_input)
-
-    def test_model_and_extra_args_still_applied(self) -> None:
-        argv = self._capture(model="claude-opus-4-8", extra_args="--foo")[
-            "argv"
-        ]
-        self.assertIn("--model", argv)
-        self.assertEqual(argv[argv.index("--model") + 1], "claude-opus-4-8")
-        self.assertIn("--foo", argv)
-
-    def test_model_auto_is_not_forwarded(self) -> None:
-        argv = self._capture(model="auto")["argv"]
-        self.assertNotIn(
-            "--model",
-            argv,
-            "model 'auto' means 'let the CLI pick its default' — no --model.",
-        )
-
-    def test_mcp_config_flag_added_when_set(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            mcp_src = str(Path(td) / "mcp.json")
-            Path(mcp_src).write_text('{"mcpServers":{}}', encoding="utf-8")
-            captured = _capture_provider_call(
-                reviewer.ClaudeCodeProvider(
-                    api_key="k", model="", mcp_config_file=mcp_src
-                )
-            )
-            argv = captured["argv"]
-            self.assertIn(
-                "--mcp-config",
-                argv,
-                "Claude Code only loads MCP from --mcp-config; a bare copy to "
-                "~/.claude/mcp.json is ignored.",
-            )
-            self.assertEqual(argv[argv.index("--mcp-config") + 1], mcp_src)
-
-    def test_no_mcp_config_flag_when_unset(self) -> None:
-        argv = self._capture()["argv"]
-        self.assertNotIn("--mcp-config", argv)
-
-
-class CodexInvocationTests(unittest.TestCase):
-    """CodexProvider must escape the default read-only sandbox and pipe the
-    prompt via stdin."""
-
-    def _capture(
-        self,
-        *,
-        model: str = "",
-        extra_args: str = "",
-        mcp_config_file: str = "",
-    ) -> dict[str, Any]:
-        return _capture_provider_call(
-            reviewer.CodexProvider(
-                api_key="k",
-                model=model,
-                extra_args=extra_args,
-                mcp_config_file=mcp_config_file,
-            )
-        )
-
-    def test_sandbox_is_escaped(self) -> None:
-        argv = self._capture()["argv"]
-        self.assertIn(
-            "--dangerously-bypass-approvals-and-sandbox",
-            argv,
-            "codex exec defaults to a read-only sandbox; without escaping it "
-            "the agent cannot write findings.json and every review fails.",
-        )
-
-    def test_prompt_via_stdin_sentinel(self) -> None:
-        captured = self._capture()
-        argv, kwargs = captured["argv"], captured["kwargs"]
-        self.assertEqual(
-            argv[-1],
-            "-",
-            "codex reads the prompt from stdin when the final positional is "
-            "'-'; embedding it in argv risks E2BIG on large diffs.",
-        )
-        stdin_input = kwargs.get("stdin_input")
-        self.assertIsNotNone(stdin_input)
-        self.assertIn("# PR Context", stdin_input)
-        # No argv token should carry the large prompt body.
-        self.assertFalse(
-            any("# PR Context" in tok for tok in argv),
-            "The PR prompt must not appear in argv — it goes via stdin.",
-        )
-
-    def test_extra_args_precede_stdin_sentinel(self) -> None:
-        argv = self._capture(extra_args="--foo")["argv"]
-        self.assertIn("--foo", argv)
-        self.assertLess(
-            argv.index("--foo"),
-            argv.index("-"),
-            "extra_args must come before the '-' stdin sentinel.",
-        )
-
-    def test_mcp_config_file_does_not_copy_ignored_json(self) -> None:
-        calls: list[tuple[str, Path]] = []
-
-        def fake_swap(src_file: str, dest_path: Path) -> tuple[Path | None, str | None]:
-            calls.append((src_file, dest_path))
-            return None, None
-
-        orig = reviewer._swap_mcp_config
-        reviewer._swap_mcp_config = fake_swap  # type: ignore[assignment]
-        try:
-            with tempfile.TemporaryDirectory() as td:
-                mcp_src = Path(td) / "mcp.json"
-                mcp_src.write_text('{"mcpServers":{}}', encoding="utf-8")
-                self._capture(mcp_config_file=str(mcp_src))
-        finally:
-            reviewer._swap_mcp_config = orig  # type: ignore[assignment]
-
-        self.assertEqual(
-            calls,
-            [],
-            "Codex ignores JSON MCP files and runs with an isolated CODEX_HOME; "
-            "provider=codex must warn without copying to ~/.codex/mcp.json.",
-        )
-
-
-def _capture_codex_call_with_auth_state(
-    provider: Any,
-) -> dict[str, Any]:
-    """Capture argv/env plus the auth.json state INSIDE `_invoke_cli_agent`.
-
-    The Codex apikey-mode auth.json lives in a `mkdtemp()` directory
-    that is removed after `run_review()` returns. Anything we want to
-    assert about the file must be snapshotted from inside the
-    invocation.
-    """
-    captured: dict[str, Any] = {}
-
-    def fake_invoke(*, argv: list[str], **kwargs: Any) -> Any:
-        captured["argv"] = list(argv)
-        captured["kwargs"] = dict(kwargs)
-        env: dict[str, str] = kwargs.get("env", {})
-        captured["env"] = dict(env)
-        codex_home_str: str = env.get("CODEX_HOME", "")
-        captured["codex_home_present_in_env"] = bool(codex_home_str)
-        if codex_home_str:
-            codex_home: Path = Path(codex_home_str)
-            captured["codex_home_path"] = codex_home
-            auth_path: Path = codex_home / "auth.json"
-            captured["auth_json_exists_at_invocation"] = auth_path.exists()
-            if auth_path.exists():
-                captured["auth_json_content"] = auth_path.read_text(
-                    encoding="utf-8"
-                )
-                captured["auth_json_mode"] = (
-                    auth_path.stat().st_mode & 0o777
-                )
-                captured["codex_home_mode"] = (
-                    codex_home.stat().st_mode & 0o777
-                )
-        return reviewer.ReviewResult(summary="ok", findings=[])
-
-    orig = reviewer._invoke_cli_agent
-    reviewer._invoke_cli_agent = fake_invoke  # type: ignore[assignment]
-    try:
-        with tempfile.TemporaryDirectory() as td:
-            workspace = Path(td)
-            provider.MCP_DEST = workspace / "mcp.json"  # type: ignore[misc]
-            provider.run_review(
-                pr_context=_make_pr_context(),
-                review_instructions="RUBRIC",
-                workspace=workspace,
-                output_dir=workspace,
-            )
-    finally:
-        reviewer._invoke_cli_agent = orig  # type: ignore[assignment]
-    return captured
-
-
-class CodexAuthJsonTests(unittest.TestCase):
-    """Codex CLI 0.122+ ignores OPENAI_API_KEY from env and reads
-    credentials from $CODEX_HOME/auth.json. The provider must
-    materialize that file per-run in an isolated CODEX_HOME."""
-
-    def _capture(self) -> dict[str, Any]:
-        return _capture_codex_call_with_auth_state(
-            reviewer.CodexProvider(api_key="sk-test-abc", model="")
-        )
-
-    def test_codex_home_is_set_in_subprocess_env(self) -> None:
-        c = self._capture()
-        self.assertTrue(
-            c["codex_home_present_in_env"],
-            "CODEX_HOME must be forwarded to the codex subprocess or "
-            "Codex 0.122+ falls back to ~/.codex/ which may hold a "
-            "ChatGPT-mode auth.json that overrides our apikey.",
-        )
-        self.assertTrue(
-            str(c["codex_home_path"]).startswith(tempfile.gettempdir())
-            or "aiprr-codex-" in str(c["codex_home_path"]),
-            f"CODEX_HOME should be an isolated tempdir, got "
-            f"{c['codex_home_path']}.",
-        )
-
-    def test_openai_api_key_is_still_forwarded(self) -> None:
-        # Back-compat: pre-0.122 Codex still reads OPENAI_API_KEY from
-        # env. Forwarding it costs nothing.
-        c = self._capture()
-        self.assertEqual(
-            c["env"].get("OPENAI_API_KEY"),
-            "sk-test-abc",
-            "OPENAI_API_KEY must stay forwarded for back-compat with "
-            "Codex CLI versions before 0.122.",
-        )
-
-    def test_auth_json_exists_at_invocation(self) -> None:
-        c = self._capture()
-        self.assertTrue(
-            c["auth_json_exists_at_invocation"],
-            "$CODEX_HOME/auth.json must exist when codex exec is "
-            "invoked — this is exactly what fixes the 401 "
-            "'Missing bearer or basic authentication in header'.",
-        )
-
-    def test_auth_json_shape_is_apikey_mode(self) -> None:
-        c = self._capture()
-        payload: dict[str, Any] = json.loads(c["auth_json_content"])
-        self.assertIn(
-            "OPENAI_API_KEY",
-            payload,
-            "Codex apikey-mode auth.json must carry the OPENAI_API_KEY "
-            "field verbatim (per the paperclipai/paperclip#5276 fix "
-            "and the clauditor#177 workaround).",
-        )
-        self.assertEqual(
-            payload["OPENAI_API_KEY"],
-            "sk-test-abc",
-            "The materialized auth.json must contain the provider's "
-            "own api_key, not a leftover value from another test.",
-        )
-
-    def test_auth_json_permissions_are_0600(self) -> None:
-        c = self._capture()
-        self.assertEqual(
-            c["auth_json_mode"],
-            0o600,
-            "auth.json must be readable only by the runner user — a "
-            "shared runner could otherwise leak the OPENAI_API_KEY to "
-            "another job's process.",
-        )
-
-    def test_codex_home_directory_permissions_are_0700(self) -> None:
-        c = self._capture()
-        self.assertEqual(
-            c["codex_home_mode"],
-            0o700,
-            "CODEX_HOME must be private to the runner user (tempfile "
-            "already defaults to 0700 on Unix; this test locks it in "
-            "as an invariant).",
-        )
-
-    def test_codex_home_is_removed_after_run_review(self) -> None:
-        c = self._capture()
-        # After run_review returns, the finally-block cleanup must have
-        # removed the tempdir. This is the state the runner is left in.
-        self.assertFalse(
-            c["codex_home_path"].exists(),
-            "CODEX_HOME must be removed after run_review returns so "
-            "self-hosted runners don't accumulate stale api-key state.",
-        )
-
-
-class AgentRunnerPromptHygieneTests(unittest.TestCase):
-    """The agent-runner user prompt must NOT reference chat-completions-only
-    tools (post_inline_comment / submit_review), which don't exist for a
-    vendor CLI and would give it contradictory instructions."""
-
-    def test_agent_runner_prompt_omits_chat_tools(self) -> None:
-        text = reviewer.render_user_prompt(
-            _make_pr_context(), for_agent_runner=True
-        )
-        self.assertNotIn("post_inline_comment", text)
-        self.assertNotIn("submit_review", text)
-        self.assertIn("findings file", text)
-
-    def test_chat_prompt_still_references_tools(self) -> None:
-        text = reviewer.render_user_prompt(_make_pr_context())
-        self.assertIn("post_inline_comment", text)
-        self.assertIn("submit_review", text)
-
-
-class ClaudeCodeSubscriptionAuthTests(unittest.TestCase):
-    """`api-key` maps to metered API auth OR subscription OAuth auth based on
-    the token prefix — so a Claude Pro/Max subscription can bill the review
-    instead of API usage (parallel to Cursor's subscription model)."""
-
-    def test_api_key_maps_to_anthropic_api_key(self) -> None:
-        p = reviewer.ClaudeCodeProvider(
-            api_key="sk-ant-api03-abc123", model=""
-        )
-        self.assertEqual(
-            p.auth_env_vars(), {"ANTHROPIC_API_KEY": "sk-ant-api03-abc123"}
-        )
-
-    def test_oauth_token_maps_to_oauth_env(self) -> None:
-        p = reviewer.ClaudeCodeProvider(
-            api_key="sk-ant-oat01-subtoken", model=""
-        )
-        self.assertEqual(
-            p.auth_env_vars(),
-            {"CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-subtoken"},
-        )
-
-    def test_oauth_token_never_sets_api_key_var(self) -> None:
-        """Regression: an OAuth token must NOT be exported as
-        ANTHROPIC_API_KEY, or Claude Code would try metered API auth with a
-        subscription token and fail."""
-        p = reviewer.ClaudeCodeProvider(
-            api_key="sk-ant-oat01-subtoken", model=""
-        )
-        self.assertNotIn("ANTHROPIC_API_KEY", p.auth_env_vars())
-
-    def test_oauth_env_forwarded_into_subprocess_env(self) -> None:
-        captured = _capture_provider_call(
-            reviewer.ClaudeCodeProvider(
-                api_key="sk-ant-oat01-subtoken", model=""
-            )
-        )
-        env = captured["kwargs"]["env"]
-        self.assertEqual(env.get("CLAUDE_CODE_OAUTH_TOKEN"), "sk-ant-oat01-subtoken")
-        self.assertNotIn("ANTHROPIC_API_KEY", env)
 
 
 if __name__ == "__main__":

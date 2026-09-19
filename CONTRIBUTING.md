@@ -7,7 +7,7 @@ Thanks for your interest in improving AI Diff Reviewer. This is an open-source p
 - **Bug reports** — open an issue with a minimal reproduction (workflow YAML + the failure mode you saw).
 - **Feature requests** — open an issue *first*, before sending a PR. Big surface-area changes (new inputs, new outputs, new providers) need a quick design discussion to make sure the action stays simple and stable.
 - **Prompt improvements** — the bundled default prompt (`prompts/default.md`) is opinionated but not sacred. PRs that make the reviewer catch more real bugs and fewer false positives are very welcome. Include before/after examples on a real PR if you can.
-- **Provider implementations** — see `docs/PROVIDERS.md` for the contract a new provider has to satisfy. OpenAI, Gemini, and Azure OpenAI are explicitly on the roadmap.
+- **Provider implementations** — see `docs/PROVIDERS.md § Adding a runner or backend` (a new vendor on an existing protocol is a host suffix + tier row; a new runner is a class). OpenAI and Azure Foundry shipped in v2.1.0; Gemini and Bedrock remain open.
 
 ## Project layout
 
@@ -35,8 +35,9 @@ The reviewer is one Python script using only the standard library. No virtualenv
 python3 -m py_compile scripts/reviewer.py
 
 # Run against a real PR locally (requires the same env the action sets)
-export AIPRR_PROVIDER=anthropic
+export AIPRR_PROVIDER=anthropic              # any of the six runners; see docs/DEVELOPMENT_COMMANDS.md
 export AIPRR_API_KEY=$ANTHROPIC_API_KEY
+# export AIPRR_API_BASE=https://…            # optional backend (Z.ai / xAI / Azure / gateway)
 export AIPRR_GH_TOKEN=$GITHUB_TOKEN
 export AIPRR_REPO=DailybotHQ/ai-diff-reviewer
 export AIPRR_PR_NUMBER=42
@@ -67,6 +68,9 @@ python3 scripts/reviewer.py
 ## Releasing
 
 Tagged releases follow SemVer (`v1.2.3`). The `release.yml` workflow auto-updates the major-version moving tag for the current line (`v2`) when a new `v2.x.y` is published, so consumers pinning `@v2` get patches and minor features automatically.
+
+- The squash merge's **subject** decides the version bump (`feat:` → minor, `fix:`/`perf:` → patch, `!`/`BREAKING CHANGE` → major): give PRs a Conventional Commits title.
+- Never write the literal `[skip release]` marker in a commit body unless you want to suppress the release. Squash merges carry every commit body into the merge commit and the release job reads the whole message (see `docs/RELEASE_RECOVERY.md`). In prose, write "skip-release marker".
 
 ## Code of conduct
 

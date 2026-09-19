@@ -7,11 +7,468 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [2.3.1] — 2026-09-17
+
+### Fixed
+
+- **A review that said `approve` could ship with a red check.** The strictness
+  gate was evaluated *after* the review had been posted, so the model's
+  `Recommendation:` line — written before the runtime knew the outcome — could
+  contradict the check. `compute_check_gate()` is now the single decision
+  point, evaluated before the review is posted: the review body, the tracking
+  comment's `**Strictness gate:**` line and the exit code all derive from one
+  call. Every review body now ends with a runtime-written
+  `> **Check status: ✅ passing | 🚫 failing**` block, and a model
+  `Recommendation: approve` is rewritten to `request-changes` whenever the
+  gate is failing.
+- **Under `advisory`, a fixed finding could hold the check red forever.**
+  `prior-findings-resolution: advisory` retires a prior finding only when a
+  maintainer resolves its thread — but `collapse-previous: true` (the default)
+  minimizes those threads on the next push, removing the only escape. An
+  outstanding `critical` therefore gated every subsequent round even after a
+  real fix. `advisory` now applies the same corroboration test as `verified`
+  (model reported `resolved` **and** the fingerprint was not re-emitted this
+  round **and** the file changed or is gone) when the finding's thread is
+  already collapsed (`isMinimized`; an outdated-but-visible thread does not
+  count, since a maintainer can still resolve it). Corroboration
+  is unchanged, findings on live threads keep the strict behaviour, and
+  `block-on-critical` is not weakened for new findings.
+  Retirements taken this way are counted in the summary footer as
+  `N auto-retired (fix corroborated; thread already collapsed)`, so a check
+  that went green without human sign-off is still traceable.
+  See [`docs/ITERATION_AWARENESS.md` § 14.4.1](docs/ITERATION_AWARENESS.md).
+
+- **An already-stuck PR stayed stuck after upgrading.** Corroboration tested
+  "file changed since the last reviewed head", so a fix that landed in an
+  earlier round could never be corroborated on a later run — the delta no
+  longer touched the file. Each prior finding now carries the head SHA of the
+  review that posted it (`pullRequestReview.commit.oid`), and
+  `compute_changed_since_raised()` diffs that SHA against HEAD (one `git diff`
+  per distinct review SHA). A same-head re-run or an unrelated push after the
+  fix now passes clean. Pre-2.3.1 findings keep delta-only evidence; an
+  unresolvable SHA counts as no evidence, never as changed.
+- **Three bad inline anchors cost every inline comment.** GitHub rejects the
+  whole review with HTTP 422 when any one anchor is outside the diff, and the
+  fallback dropped all of them — on one dogfood run 3 bad anchors lost all 7
+  comments. `gh_submit_review_with_fallback` now parses the PR diff's hunk
+  ranges and retries once with only the provably-anchorable comments (unknown
+  files are kept; a truncated diff is not evidence against them), logging the
+  dropped anchors by `path:line`. Summary-only remains the last resort.
+- **The summary footer could disagree with the gate.** It ran a second
+  reconciliation with different inputs. `run_iar_post_llm` now stores the one
+  it gated on (`ReviewResult.prior_reconciliation`) and the footer reads it
+  back; after a post-LLM crash the footer reports nothing as resolved, matching
+  the escalated gate.
+- **A retired finding could flap the check back to red.** Under `advisory` the
+  auto-retired thread stays unresolved on GitHub, so it was re-read as a prior
+  finding on the next round — where the delta no longer touched the fixed file,
+  so corroboration failed and it re-gated. `filter_retired_prior_findings()`
+  now drops fingerprints already in `resolved_fingerprints` before they reach
+  the gate; a genuine regression still re-surfaces through dedup.
+
+### Changed
+
+- A model `Recommendation: approve` is rewritten on **every** matching line,
+  not just the first.
+- `PriorFinding` carries `is_minimized` (and an `is_collapsed` property that
+  means minimized only);
+  `fetch_prior_findings` now selects `isMinimized` on each thread's anchoring
+  comment.
+- `skills/ai-diff-reviewer/SKILL.md`, `apply-review/SKILL.md` (new **Step 2f**)
+  and `setup/reference.md` state that a body recommending `approve` is not
+  evidence the check passed, and that `apply-review` must read the tracking
+  marker's `Highest severity` / `Strictness gate` / IAR footer before
+  summarizing a review.
+
+## [2.3.0] — 2026-09-17
+
+### Changed
+
+- **xAI defaults follow the benchmark.** `provider: grok` now defaults to
+  `grok-4.5` (was `grok-4.3`), and the xAI tier table resolves `balanced`
+  and `economy` to `grok-4.5` and `deep` to `grok-4.6`. The 2026-09-16
+  benchmark ([`tests/eval/BENCHMARK-xai-2026-09-16.md`](tests/eval/BENCHMARK-xai-2026-09-16.md),
+  16 in-process runs over the labelled corpus plus Grok CLI spot checks)
+  measured grok-4.3 at 0 of 5 known defects in ~10 s per review (it approves
+  without reviewing — confirmed live on this repo's own PR), grok-build-0.1
+  at 1 of 5 with two runs that never submitted, and grok-4.5 tied with
+  grok-4.6 (3 of 5, no false positives) at the same cost and a quarter of the
+  wall time. There is no cheaper xAI model that still reviews, so `economy`
+  is the same model as `balanced` rather than a tier that finds nothing.
+  **Cost impact:** `provider: grok` with an empty `model`, and `model: economy`
+  on any xAI backend, go from ~$0.07 to ~$0.4–0.75 per review through the
+  CLI (≈10×) — and start finding defects. To keep the old smoke behaviour,
+  pin `model: grok-4.3` explicitly.
+- **Dogfood: the Grok leg is back on `balanced`** (now grok-4.5) after the
+  deliberate `economy` re-test in 2.2.0 produced a 32-second, 42-token
+  approval of a diff that grok-4.6 had found a real defect in.
+
+## [2.2.0] — 2026-09-16
+
+### Changed
+
+- **Dogfood: the Grok leg runs on `economy` (grok-4.3) again**, deliberately, to
+  re-test the cheaper tier on live PRs after the corpus run found nothing with
+  it; the `balanced` tier itself stays on grok-4.6 until that re-test says
+  otherwise.
+- **Agent-runner retry:** a CLI that exits 0 without writing its findings
+  file gets one fresh attempt before the run is posted as an incomplete
+  review; both attempts' usage is reported and the summary says
+  `Retried once` (`CLI_INCOMPLETE_RETRIES`).
+- **Bounded CLI output capture:** stdout/stderr of agent-runner CLIs are
+  drained by reader threads that keep only the last 4 MB of each stream
+  (`CLI_OUTPUT_TAIL_MAX_BYTES`); large stdin prompts can no longer deadlock
+  against a full stdout pipe.
+- **Cursor usage telemetry (parse-or-ignore):** `provider: cursor` now runs
+  with `--output-format json` and reads any `usage` object the CLI prints
+  (`parse_cursor_usage`); when nothing is found the tracking comment keeps
+  saying `not reported by this provider`. Not verified live in this release
+  (no Cursor key in the dogfood matrix).
+- **Release hygiene:** documented that a squash body quoting `[skip release]` suppresses the release (PR #51 shipped untagged), with the recovery and the commit-message rule (`docs/RELEASE_RECOVERY.md`, `CONTRIBUTING.md`).
+
+- **Releases stamp the CHANGELOG.** `auto-release.yml` now turns
+  `## [Unreleased]` into `## [X.Y.Z] — date` (and opens a fresh empty
+  section) in the same sync commit that bumps the skill version, via
+  `.github/scripts/stamp_changelog.py` (idempotent; empty section → notice).
+  v2.0.0, v2.0.1 and v2.1.0 were restored by hand in v2.1.1.
+- **Dogfood: the in-process `openai` leg runs by default** whenever
+  `OPENAI_API_KEY` exists (opt out with the repo variable
+  `SELF_REVIEW_OPENAI_CHAT=false`); the repo's required checks now include
+  `CLI install smoke — grok`.
+- **xAI `balanced` tier now resolves to `grok-4.6`** (was `grok-4.3`; `economy`
+  stays `grok-4.3`, the built-in default for `provider: grok` is unchanged).
+  Measured on the labelled corpus in `tests/eval/`: through the Grok CLI,
+  `grok-4.3` reported 0 of 4 known defects (and once wrote no findings
+  file) while `grok-4.6` found 3 of 4 with no false positives at ~$0.5–0.85
+  and 4–10 minutes per review. The repo's own Grok dogfood leg moves to
+  `balanced`.
+- **Review-quality harness in the tree.** `tests/eval/run_eval.py` +
+  `tests/eval/corpus.json` (labelled expectations for four merged PRs) —
+  offline, never posts; documented in `docs/TESTING_GUIDE.md`.
+
+### Added
+
+- **`prior-findings-resolution` input (`advisory` | `verified`).** Incremental
+  follow-up rounds keep the v2.1.0 default: a `resolved` verdict is reported
+  but a maintainer resolves the thread and the finding keeps gating. Opting
+  into `verified` restores runtime-corroborated auto-resolution — the thread
+  is replied to and resolved only when the fingerprint is gone **and** the
+  file changed or was deleted; unverifiable claims stay open. Footer names
+  the policy when it is not the default.
+- **Checksum-verified installers.** New optional inputs
+  `cursor-installer-sha256` and `grok-installer-sha256`: the Cursor and
+  Grok install steps now download the vendor artefact to a file through
+  `.github/scripts/verified_install.sh`, log its SHA-256 on every run,
+  and — when a hash is configured — refuse to run an artefact whose hash
+  differs. The CI smoke matrix proves the gate (right hash accepted, wrong
+  hash refused). `docs/SECURITY.md § installer supply chain` states what
+  a pin does and does not cover.
+
+### Fixed
+
+- **Empty `model` on a custom `api-base` now fails fast** (for runners that route `api-base`; `cursor`/`grok` ignore it and keep their defaults) with the expected
+  value (deployment name / `glm-5.3` / `grok-4.6` / gateway id) instead of
+  silently sending the runner's default vendor model to another backend
+  (`resolve_model` ran before the providers' guards, which were unreachable).
+- **Inherited `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL`** from the workflow
+  env are validated (`validate_api_base`) and logged with a WARNING before a
+  CLI receives them on a default profile, and dropped when `api-base` is set.
+- **Agent-runner CLIs no longer lose a review on exit:** a non-zero exit
+  with a written findings file posts a partial review (footer + WARNING);
+  exit 0 without a findings file posts an explicit summary-only "incomplete
+  review" (observed live with the Grok CLI). An incomplete review is never
+  a green review: every blocking strictness fails the check (`lenient` stays
+  green by definition), the reviewed label is not stamped, `label-once`
+  does not consume the label toggle, and the prior IAR state is re-embedded
+  unchanged so no open finding is retired by an empty round.
+- **Stale findings files are removed before the CLI runs:** a
+  `.aiprr/findings.json` left by a previous step or a persistent self-hosted
+  workspace can no longer be posted as this run's review.
+- **`verified` resolution corroborates against this round's fingerprints**
+  (surfaced, overflow and silenced findings): a re-posted issue is never
+  auto-retired even when the model also claims it resolved.
+- **Agent-runner output contract uses a four-backtick fence** so the escaped
+  ```suggestion example inside the schema cannot end the JSON block early
+  for CLIs that render the directive as Markdown.
+- **`verified_install.sh` hardening:** `cursor-version` / `grok-version` must
+  match `^[A-Za-z0-9._-]+$` before being used as a URL or path segment;
+  `sha256sum` falls back to `shasum -a 256` and the hash compare no longer
+  needs bash 4 (macOS self-hosted runners).
+- **Agent-runner output contract** states the effective inline cap and shows
+  an escaped suggestion-block example; the prompt's tool-substitution note
+  now covers `post_inline_comment` / `submit_review` (prompt v3.1.1); the
+  incremental delta's truncation notice carries the read-the-rest hint.
+- **`cursor-version` now takes effect.** The vendor's installer script
+  ignores version hints, so the pin was silently a no-op; a pinned version
+  now installs the versioned package directly from Cursor's download host
+  (same layout and symlinks as the official installer).
+
+## [2.1.0] — 2026-09-16
+
+**Theme — runners × backends, measured cost, better follow-ups.** The action keeps its six-line quick start, but every runner can now be pointed at another backend with one input (`api-base`), two runners are new (`openai` in-process, `grok` CLI), cost is controlled by a one-word tier and shaped diffs and reported per review, follow-up rounds review the actual new diff and carry outstanding findings forward, the default prompt is v3.1, and the whole new surface went through a security pass. No input was renamed or removed; empty `api-base` is byte-identical to v2.0.x. Details per area below; the local skill pack gains base-sync on `open-pr`, a runner × backend setup wizard, and descriptions that fit every host's limit.
+
+### Added
+
+- **`api-base` input — bring your own endpoint (the backend contract).**
+  `provider` keeps naming the *runner* (who owns the review loop); the new
+  optional `api-base` names the *backend* (where the model lives). The
+  host is classified into an endpoint profile (`anthropic`, `openai`,
+  `azure`, `xai`, `zai`, or `custom`) that carries the per-runner quirks
+  (auth header style, prompt-caching flags, Codex wire API, Azure
+  workarounds). Empty keeps every existing provider byte-identical.
+  Values are validated before any outward call: absolute `https://` URL
+  (plain `http://` for localhost only), no embedded credentials, no
+  query/fragment. This entry ships the contract and the resolver
+  (`EndpointProfile`, `resolve_endpoint_profile`, `validate_api_base`);
+  the runners honour it in the follow-up entries below as they land.
+  Ignored by `cursor` (subscription-only).
+- **`anthropic` runner honours `api-base`** — Anthropic-compatible
+  backends (Z.ai GLM at `https://api.z.ai/api/anthropic`, xAI at
+  `https://api.x.ai`, or any compatible gateway). URL composed as
+  `<api-base>/v1/messages`; non-Anthropic hosts receive both `x-api-key`
+  and `Authorization: Bearer`; the `cache_control` breakpoint is sent only
+  to `api.anthropic.com`; errors name the endpoint kind and host, never the
+  key. The default profile's request is byte-identical to before (locked by
+  a snapshot test). New example `examples/provider-anthropic-zai.yml`.
+- **`openai` provider — OpenAI-compatible chat-completions runner.** A
+  second in-process runner (zero install, bounded turns) that translates
+  the Anthropic-shaped loop at the boundary: tools ↔ function tools, tool
+  results ↔ `role: tool` messages, `tool_calls` ↔ `tool_use` blocks,
+  `finish_reason` ↔ `stop_reason`; malformed tool arguments are surfaced
+  to the model instead of crashing. Default model `gpt-5.6-luna`. With
+  `api-base` the same runner covers Azure Foundry (v1 endpoint; Bearer +
+  `api-key` headers; `max_completion_tokens`), xAI (`https://api.x.ai/v1`)
+  and Z.ai (`https://api.z.ai/api/coding/paas/v4`) — `max_tokens` on those.
+  Shared retrying HTTP client (`_post_json_with_retries`) now backs both
+  chat-completions providers. New example `examples/provider-openai.yml`.
+- **`claude-code` runner honours `api-base` (Z.ai GLM — the recommended
+  GLM runner; xAI Anthropic-compatible too).** On a custom backend the CLI
+  receives the documented env contract (`ANTHROPIC_BASE_URL`,
+  `ANTHROPIC_AUTH_TOKEN`, `API_TIMEOUT_MS`, the three
+  `ANTHROPIC_DEFAULT_*_MODEL` aliases pinned to `model`) and `--model` is
+  always passed; `ANTHROPIC_API_KEY` is not set there. `model: auto` and
+  Claude subscription tokens fail fast on non-Anthropic hosts. Default
+  profile env/argv unchanged (snapshot tests). New example
+  `examples/provider-claude-code-glm.yml`; `docs/PROVIDERS.md` § "Z.ai GLM —
+  recommended runner and why".
+- **`codex` runner honours `api-base` (Azure Foundry / xAI / Z.ai).** A
+  per-run `config.toml` is written next to `auth.json` in the isolated
+  `CODEX_HOME` declaring an OpenAI-compatible Responses-API provider
+  (`wire_api = "responses"`, `env_key = "OPENAI_API_KEY"`); Azure hosts get
+  the image-generation header workaround and `image_generation = false`.
+  `model` (deployment name or backend id) is required there; `--model` is
+  always passed. Strings are TOML-escaped; the key never lands in the file.
+  A `models.json` cloned from Codex's bundled catalog (conservative
+  capabilities, no OpenAI-only tool namespaces) is written alongside and
+  referenced via `model_catalog_json` — required for xAI, harmless on
+  Azure; degrades to no catalog if the CLI cannot list its bundled models.
+  Live-verified on Azure Foundry (Codex 0.154.0). **Known limitation:**
+  Codex 0.154 always sends its freeform `apply_patch` tool
+  (`tools[].type: custom`), which xAI's Responses API rejects (HTTP 422) —
+  the runtime warns on `xai` / `zai` / `custom` hosts; use `provider:
+  openai` or `provider: grok` for xAI. Z.ai via Codex is unverified.
+- **`grok` provider — xAI Grok CLI agent-runner, modular install.** The
+  official `grok` CLI runs headless inside the full review contract: rubric
+  + findings schema via `--rules`, the PR diff via a private 0600
+  `--prompt-file`, findings through `.aiprr/findings.json` (gating, IAR,
+  cap, collapse all apply), `XAI_API_KEY` the only credential in the
+  subprocess env, web search / subagents / plan mode **off by default**,
+  `--output-format json` for usage telemetry. Default model `grok-4.3`.
+  `action.yml` installs the CLI only when `provider: grok`, with a new
+  `grok-version` pin input; `code_check.yml` smoke-tests the installer.
+  New example `examples/provider-grok.yml`.
+- **Model tier aliases + cost-efficient defaults matrix.** `model` accepts
+  `balanced` / `economy` / `deep`, resolved per runner × backend from one
+  table (`MODEL_TIER_TABLE`) and logged; empty `model` keeps the built-in
+  default (no behaviour change), explicit ids pass through, Azure /
+  custom hosts fail fast with guidance. The dated matrix (verified
+  2026-09-16) lives in `docs/PROVIDERS.md` with rationale per row and a
+  label-routed recipe. Notable verified facts: `claude-sonnet-5` ($2/$10)
+  is current and cheaper than the legacy `claude-sonnet-4-6` ($3/$15)
+  the built-in default still names (the run logs a hint; `model:
+  balanced` opts in); `gpt-5.6-luna` ($0.20/$1.20) is cheaper than
+  `gpt-5.4-mini` ($0.75/$4.50). An indicative price table
+  (`INDICATIVE_PRICES_USD_PER_MTOK`) is shared with the usage telemetry.
+- **`agent-max-turns` is enforced natively on `grok`** (`--max-turns`);
+  other CLIs get an accurate per-provider warning (Claude Code:
+  `--max-budget-usd` via `agent-extra-args`). Junk values abort.
+- **Diff shaping — `ignore-paths` input + built-in generated-file
+  exclusions.** Lockfiles, minified bundles, source maps, vendored trees
+  (`node_modules/`, `vendor/`, `dist/`) and test snapshots are removed
+  from the diff the model receives — **before** the 200k-char cap, so a
+  huge lockfile can no longer crowd out real changes — and listed back
+  under an "Omitted from the diff" block with line counts (the
+  changed-files list flags them too). `ignore-paths` adds gitignore-style
+  globs (`**` spans directories; a bare pattern matches basenames). Saves
+  tokens on every turn. IAR's range hash and new-lines % still use raw
+  git output and are unaffected.
+- **Anthropic path caches the diff message too.** A second
+  `cache_control` breakpoint on the first user message (added on a copy at
+  the provider boundary; the in-memory conversation is untouched; sent only
+  to `api.anthropic.com`) makes turns 2..N read the PR diff from cache.
+  Both chat-completions providers now log a compact per-call
+  `usage: in=… cache_read=… cache_write=… out=…` line.
+- **Real usage telemetry and cost surfacing on every review.**
+  `UsageTelemetry` is captured from the provider: API `usage` objects
+  (`anthropic`, `openai`), the Claude Code stream-json `result` event
+  (incl. vendor cost), Codex `--json` `turn.completed` events (the
+  provider now passes `--json`), the Grok JSON document (incl. vendor
+  cost); Cursor reports nothing and says so. The tracking comment gains a
+  `**Usage:** 341.2k in (88% cached) · 2.1k out · est. $0.05 (indicative)
+  · 6 turns · 71s` line, the run log prints the same, and the
+  `iteration-tokens-used` output is real (no longer `"0"`). Cost is
+  vendor-reported when available, otherwise an indicative estimate from
+  the dated price table; never gate CI on it.
+- **Incremental follow-up reviews.** Rounds 2+ with a trusted delta (prior
+  reviewed head is an ancestor of HEAD, no escape/safety-net override, at
+  least one prior finding still open) send the model only the hunks that
+  changed since its last review, one-liners for the other files, and a
+  table of its own still-open findings read back from the PR threads. The
+  model classifies each prior finding (`update_prior_finding` tool /
+  `prior_findings` array). Resolution claims are advisory until a
+  maintainer resolves the thread; outstanding findings retain their
+  blocking severity without duplicate comments. Inline cap and `max-turns` scale with the
+  delta (floors 3 / 6; prior criticals never starve). Summary footer
+  `Since last review: resolved N · still open M · regressed K · new J`;
+  marker annotation `mode=incremental`. Every inline comment now carries
+  a stable hidden marker `<!-- ai-pr-reviewer-finding: fp=… sev=… -->`.
+  Full review remains the fallback on rebase / force-push, the escape
+  label, the 30 % safety net, or any error.
+- **§ 13.1 closed:** the agent-runner inline cap is enforced inside the
+  IAR post-LLM step after fingerprinting, so overflow findings are known
+  to dedup instead of re-surfacing as new.
+- **Default prompt v3.** Adds triage-first planning, a verification
+  budget, a false-positive calibration list, an explicit finding shape,
+  an omitted-files acknowledgement and the follow-up-review section;
+  severity model, "what NOT to comment on" and summary shape are
+  unchanged so extensions keep layering. Triage is explicitly decoupled
+  from severity and unverified suspicions go to the summary instead of
+  inline with a lowered severity; the session always ends with
+  `submit_review`. The agent-runner findings directive keeps only the
+  file-safety rule (no duplicated budget text). Evaluated offline
+  before/after on four merged PRs with two live backends, then refined
+  after a calibration review (see `docs/PROMPTS.md`). The agent-runner
+  findings directive's JSON example is now valid JSON (the `// optional`
+  comment that the review itself flagged is gone; the rule text below the
+  example already says the field is optional).
+  Default profile argv/env unchanged and no config/catalog file is
+  written. New example `examples/provider-codex-azure.yml`.
+
+### Security
+
+- **`api-base` hardening.** Hostnames must be ASCII (internationalised
+  domains only in their explicit punycode form) so a homoglyph host can
+  never masquerade as a vendor domain in logs; IPv6 literals are handled
+  (`http://[::1]` is a loopback exception like `localhost`). When the
+  host is not a recognised vendor endpoint the run logs a WARNING naming
+  the host that will receive `api-key`.
+- **Bounded untrusted input from vendor CLIs.** The agent-runner findings
+  file is capped at 5 MB (`MAX_FINDINGS_FILE_BYTES`; larger files are
+  refused, not parsed); usage parsers already scan a bounded stdout tail.
+- **`ignore-paths` cannot stall the runner.** Globs are matched by a
+  backtracking-free segment matcher (`_GlobMatcher`) instead of a compiled
+  regex — the regex form backtracked exponentially on patterns such as
+  `*.*.*.*.ts` against a long non-matching file name, and file names are
+  PR-controlled. Globs are also capped in count (200) and length (256
+  characters). Semantics are unchanged (`**`, `*`, `?`, `/` anchoring,
+  trailing `/`).
+- **Persisted marker state cannot inject git arguments.** `base_sha` /
+  `head_sha` read back from the tracking comment's `ai-pr-reviewer-state`
+  JSON are accepted only as hex object ids (4–64 chars); anything else
+  (e.g. `--output=/path`) becomes `""`, which disables the delta fast
+  path instead of reaching `git diff` / `git merge-base` as an argv
+  token. Found by the Task 13 security review of the branch.
+- **Installer steps honour a pre-installed CLI.** The `cursor` and `grok`
+  install steps skip the `curl | bash` installer when the binary is
+  already on `PATH` (self-hosted / pre-provisioned runners can mirror the
+  installer in-house). `provider: cursor` now logs a WARNING and ignores
+  `api-base` instead of silently accepting it (Cursor has no
+  bring-your-own-endpoint lane).
+- `docs/SECURITY.md` documents the new surface: where the key goes with a
+  custom endpoint, per-run generated files and their permissions, Grok's
+  web-search/subagent defaults, vendor stdout as untrusted input, the
+  Grok installer supply chain, and a credential-lanes table asserted by
+  tests. `.review/extension.md` gains matching `critical`/`warning`
+  rules for the reviewer itself.
+
+### Fixed
+
+- **Incremental review safety:** preserve outstanding criticals in the gate and marker state, use the actual previous-head delta before truncation, paginate prior threads, and force full review on base movement. File edits and absent fingerprints no longer auto-resolve threads.
+- **Backend isolation and credential routing:** custom endpoints have separate tracking, collapse and IAR scopes; the in-process HTTP client refuses redirects, and endpoint validation rejects raw control characters.
+- **Usage accounting:** include uncached input, cache reads, cache writes and output exactly once; normalize Codex cached-input subsets. Add offline safety regressions, including the one-selected-CLI installation invariant.
+
+- **Skill descriptions fit the 1,024-character Open Agent Skills limit.**
+  Pi printed `description exceeds 1024 characters (1695)` for the
+  vendored skill; the parent `SKILL.md` and `apply-review/SKILL.md`
+  descriptions are rewritten as compact routing summaries (the full
+  trigger catalogues stay in the body) and
+  `scripts/validate-frontmatter.py` now fails on descriptions over 1,024
+  characters or names over 64. Downstream vendored copies clear the
+  warning when they pick up the release that ships this.
+
+### Changed
+- **Dogfood follow-ups from the first self-review of the release PR.** An
+  `api-base` given with a trailing `/v1` (as many vendor docs show it) no
+  longer produces `/v1/v1/messages` (`join_endpoint_path`); the Grok
+  installer steps carry their trust justification inline; the runtime's
+  size is stated honestly (~10k LOC, historical soft ceiling crossed
+  deliberately — `docs/STANDARDS.md`). CI actions bumped:
+  `actions/setup-node` and `actions/setup-python` to v7 (supersedes the
+  Dependabot PR #48).
+- **`setup` wizard knows runners × backends.** Q1 is now *runner* +
+  *backend* with a resolution table (`api-base`, secret name, suggested
+  `model` per pair, incl. Azure Foundry, xAI, Z.ai, self-hosted
+  gateways), recommendation shortcuts, agent-runner hardening lines
+  (`persist-credentials: false`, non-fork `if:`) emitted for every CLI
+  runner including `grok`, and per-backend console URLs for the key.
+- **`open-pr` sub-skill syncs the branch with the remote base before
+  opening or refreshing a PR.** New automatic Step 1.5: fetch, merge
+  `origin/<base>` into the current branch when behind, resolve conflicts
+  keeping both sides' intent, run the repo's quick validation, commit,
+  and push the current branch (non-force, announced in one line, no
+  extra prompt). Honest trust boundary rewritten accordingly; explicit
+  stop conditions (dirty tree, unjustifiable/binary conflict, failing
+  gate, rejected push, linear-history repos ask once before rebase +
+  `--force-with-lease`). Preview shows the sync outcome; the PR body
+  gains a `## Merge notes` section when conflicts were resolved.
+- **Dogfood matrix covers the new runners and backends.** `self-review.yml`
+  adds legs for `grok` (`XAI_API_KEY`), `claude-code` on Z.ai GLM
+  (`ZAI_CODING_API_KEY` + `api-base`), `codex` on Azure Foundry
+  (`AZURE_OPENAI_API_KEY` + `AZURE_OPENAI_BASE_URL` /
+  `AZURE_OPENAI_MODEL_DAILY` repo variables) and an opt-in in-process
+  `openai` leg (`SELF_REVIEW_OPENAI_CHAT=true`); smoke legs use the
+  `economy` tier alias; `api-base` flows per leg. The four original legs
+  are unchanged and legs without secrets stay absent from the matrix.
+- **Test suite grew to 703 tests across 16 files** with three
+  cross-cutting nets for the multi-backend work: a runner × backend
+  matrix, a default-profile back-compat snapshot table captured from
+  `main` (intentional deltas listed explicitly), and hardening
+  regressions. `docs/TESTING_GUIDE.md` and `tests/README.md` now describe
+  the real suite.
+
+## [2.0.1] — 2026-07-17
+
 ### Fixed
 
 - **Author-association gate is permission-aware on private org repos.** When the webhook `pull_request.author_association` under-reports membership (e.g. `CONTRIBUTOR` for an org admin with team-granted access), the runtime checks collaborator permission on **private / internal** repos only and allows `admin`, `maintain`, or `write` before skipping. Public repos stay association-only so narrowed presets like `OWNER,MEMBER` remain strict. Permission lookup failures fail-open on private/internal repos and fail-closed on public repos. Actionable logs include webhook association, resolved permission, visibility, allow-list, and decision. Private-repo consumers no longer need `author-association: ''` solely to work around the webhook quirk (Option B — permission-aware gate; see `docs/SECURITY.md`).
 
 - **Complexity labels now work on all providers.** When `complexity-labels-enabled` is `true`, agent-runner providers (`cursor`, `claude-code`, `codex`) include a required `complexity` field in `.aiprr/findings.json`; chat-completions uses `set_pr_complexity`. If the model omits the level, a diff-based heuristic fallback still applies the label so the feature is provider-agnostic end-to-end. `pr-description-mode: autocomplete` on agent-runners remains chat-completions-only.
+
+### Changed
+- **Harness: Deep Work Plan skill bumped to v2.17.0 + AI Diff Reviewer
+  addon wired (Flow B).** Vendored `deepworkplan` via
+  `npx skills update deepworkplan` (lockfile hash refresh). New addon
+  lands at `.agents/skills/deepworkplan/addons/ai-diff-reviewer/`.
+  Documented Flow B in `AGENTS.md` / `docs/AI_AGENT_COLLAB.md` /
+  `.agents/docs/skills_agents_catalog.md`: Security Review gains a
+  local review pass (skill + `.review/extension.md`); CI dual-surface
+  stays `.github/workflows/self-review.yml` (no consumer
+  `pr-review.yml`). Dailybot addon already present — reconciled, no
+  wiring changes. Consumer Action runtime unchanged.
+
+## [2.0.0] — 2026-07-16
 
 > **Shipping as v2.0.0.** Merge of this line cuts a SemVer major via
 > `auto-release.yml` (`feat!:` commit). **`@v2` is the default consumer
@@ -30,16 +487,6 @@ Full guide: [`docs/MIGRATION_v2.md`](docs/MIGRATION_v2.md).
   [`docs/TRIGGER_MODES.md`](docs/TRIGGER_MODES.md).
 
 ### Changed
-- **Harness: Deep Work Plan skill bumped to v2.17.0 + AI Diff Reviewer
-  addon wired (Flow B).** Vendored `deepworkplan` via
-  `npx skills update deepworkplan` (lockfile hash refresh). New addon
-  lands at `.agents/skills/deepworkplan/addons/ai-diff-reviewer/`.
-  Documented Flow B in `AGENTS.md` / `docs/AI_AGENT_COLLAB.md` /
-  `.agents/docs/skills_agents_catalog.md`: Security Review gains a
-  local review pass (skill + `.review/extension.md`); CI dual-surface
-  stays `.github/workflows/self-review.yml` (no consumer
-  `pr-review.yml`). Dailybot addon already present — reconciled, no
-  wiring changes. Consumer Action runtime unchanged.
 - **Docs + skill + examples sync for IAR / `skip-review-label`, plus
   v2 pin surface.** Discoverability pass so Marketplace consumers and
   the companion skill see the same story as `action.yml`, and consumer

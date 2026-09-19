@@ -327,6 +327,10 @@ silently mask a broken skill-install smoke test (the whole point of
 Step 3.5's third purpose is to loudly catch broken `npx skills` fetches
 on the just-published tag), turning green what should be red.
 
+### CHANGELOG not stamped (or stamp step failed)
+
+Since v2.2.0 Step 2.5 runs `python3 .github/scripts/stamp_changelog.py --version vX.Y.Z --date <UTC date> CHANGELOG.md` before the sync commit, turning `## [Unreleased]` into `## [X.Y.Z] — date` and opening a fresh empty `[Unreleased]`. Three outcomes are normal and logged: stamped; already stamped (idempotent re-run); empty section (`::notice`, release proceeds). The step fails only when the file has no `## [Unreleased]` header at all — restore the header and re-run the release job. If a release shipped before the stamp existed (v2.0.0, v2.0.1 and v2.1.0 did), add the dated section by hand from `git log <prev>..<tag>` and keep the bullet count intact; `--dry-run` previews what the script would do.
+
 ### `skills-prompt-sync` CI check fires on a release PR
 
 Means `prompts/default.md` and `skills/ai-diff-reviewer/prompt.md`
@@ -340,6 +344,20 @@ git commit -m "fix(ci): re-sync skill prompt with default"
 
 This is normally handled by auto-release Step 2.5; only fires if you
 edited `prompts/default.md` in a PR that also touches `skills/`.
+
+### Scenario: the release silently skipped because a commit body *quoted* the marker
+
+`auto-release.yml` skips when the head commit **message** (subject + body)
+contains `[skip release]`. A squash merge concatenates every PR commit body
+into the merge commit, so a task commit that merely *mentions* the marker in
+prose ("rides the existing `[skip release]` sync commit") suppresses the
+release of the whole PR — this happened with PR #51 (`bb7deec`): the run
+reported `skipped`, no tag, no CHANGELOG stamp, no vendored-skill refresh.
+
+Recovery: merge one more conventional commit to `main` (a `feat:` or `fix:`
+subject decides the bump; the squash **subject** is what the bump derivation
+reads, `git log --format=%s`). Prevention: never write the literal marker in a
+commit body unless you mean it — spell it `skip-release marker` in prose.
 
 ---
 

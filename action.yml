@@ -38,11 +38,21 @@ inputs:
     required: true
 
   provider:
-    description: 'LLM provider. `anthropic` (default, chat-completions), `claude-code` (Claude Code CLI, agent-runner), `cursor` (Cursor Agent CLI, agent-runner), `codex` (OpenAI Codex CLI, agent-runner).'
+    description: 'LLM provider — the RUNNER that owns the review loop. `anthropic` (default, chat-completions), `openai` (OpenAI-compatible chat-completions; covers OpenAI, Azure Foundry, xAI, Z.ai and self-hosted gateways via `api-base`), `claude-code` (Claude Code CLI, agent-runner), `cursor` (Cursor Agent CLI, agent-runner), `codex` (OpenAI Codex CLI, agent-runner), `grok` (xAI Grok CLI, agent-runner). Combine with `api-base` to pick WHERE the model lives.'
     required: false
     default: 'anthropic'
   model:
-    description: 'Model id for the chosen provider. Empty = provider default. Defaults balance review quality against cost: Anthropic → `claude-sonnet-4-6`; Claude Code → `claude-sonnet-4-6` (the quality/price sweet spot for code review; never `auto`, which can silently be Opus; pin `claude-haiku-4-5` for a cheaper/shallower smoke review); Cursor → `auto` (unlimited on Pro plans; pin `composer-2.5` etc. to force a specific model); Codex → `gpt-5.6-luna` (current-gen budget model, the OpenAI parallel of the Sonnet-class choice — `gpt-5-codex` is deprecated; pin the cheaper `gpt-5.4-mini` for a shallower smoke review). Note the `api-key` input for Claude Code also accepts a `claude setup-token` subscription OAuth token (`sk-ant-oat…`) to bill against a Claude Pro/Max plan instead of API usage. See docs/PROVIDERS.md § "Choosing a cost-efficient model".'
+    description: 'Model id for the chosen provider, or a cost-profile tier alias: `balanced` (recommended), `economy` (smoke passes), `deep` (high-risk PRs) — resolved per runner × backend from the dated matrix in docs/PROVIDERS.md § "Cost-efficient defaults matrix" (Azure deployments / custom gateways have no tier rows: pass the explicit name). Empty = provider default. Defaults balance review quality against cost: Anthropic → `claude-sonnet-4-6`; Claude Code → `claude-sonnet-4-6` (the quality/price sweet spot for code review; never `auto`, which can silently be Opus; pin `claude-haiku-4-5` for a cheaper/shallower smoke review); Cursor → `auto` (unlimited on Pro plans; pin `composer-2.5` etc. to force a specific model); Codex → `gpt-5.6-luna` (current-gen budget model, the OpenAI parallel of the Sonnet-class choice — `gpt-5-codex` is deprecated; pin `gpt-5.4-mini` only if you specifically want that model — as of 2026-09-16 it is no longer cheaper than `gpt-5.6-luna`; use `model: economy` for the cheap tier); OpenAI (`provider: openai`) → `gpt-5.6-luna` as well; on a non-default `api-base` pin the backend''s own id (e.g. `grok-4.5`, `glm-5.3`, or an Azure deployment name). Note the `api-key` input for Claude Code also accepts a `claude setup-token` subscription OAuth token (`sk-ant-oat…`) to bill against a Claude Pro/Max plan instead of API usage. See docs/PROVIDERS.md § "Choosing a cost-efficient model".'
+    required: false
+    default: ''
+
+  ignore-paths:
+    description: 'Extra path globs whose diff sections are OMITTED from the review prompt (comma- or newline-separated; gitignore-style: `**` spans directories, `*`/`?` do not cross `/`, a pattern without `/` matches the basename anywhere). Additive to the built-in list of lockfiles (`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `poetry.lock`, `uv.lock`, `Cargo.lock`, `go.sum`, `composer.lock`, `Gemfile.lock`, …), minified bundles / source maps (`*.min.js`, `*.min.css`, `*.map`), vendored trees (`node_modules/`, `vendor/`, `dist/`) and test snapshots. Omitted files are still listed to the model with their line counts (and flagged in the changed-files list) so it knows what it did not see; the exclusion happens BEFORE the diff-size truncation so lockfiles never crowd real changes out. Saves tokens on every turn. Example: `**/*.generated.ts, docs/api/**`.'
+    required: false
+    default: ''
+
+  api-base:
+    description: 'Optional backend base URL — bring your own endpoint for the chosen provider (runner). Empty = the provider''s default endpoint (byte-identical to previous behaviour). Well-known values: Z.ai GLM via the Anthropic-compatible API `https://api.z.ai/api/anthropic` (for `anthropic` / `claude-code`), xAI Grok via `https://api.x.ai` (Anthropic-compatible) or `https://api.x.ai/v1` (OpenAI-compatible, for `codex` / `openai`), Azure Foundry v1 `https://<resource>.services.ai.azure.com/openai/v1` (for `codex` / `openai`; `model` is then the deployment name), Z.ai `https://api.z.ai/api/v1` (Codex Responses API) or `https://api.z.ai/api/coding/paas/v4` (`openai`). The host selects an endpoint profile (auth header style, caching, Codex wire API, Azure workarounds); unknown hosts are treated as plain protocol-compatible gateways. SECURITY: the credential in `api-key` is sent to this host — only point it at endpoints you trust. Must be an absolute `https://` URL without credentials, query or fragment (plain `http://` is accepted for localhost only). Ignored by `cursor` (subscription-only CLI). See docs/PROVIDERS.md.'
     required: false
     default: ''
 
@@ -139,7 +149,7 @@ inputs:
   # These inputs only affect the CLI providers (`claude-code`, `cursor`, `codex`).
   # Ignored by `anthropic`. Empty = provider default.
   agent-max-turns:
-    description: 'Reserved budget hint for CLI providers. Currently logs a warning instead of enforcing a cap because the shipping CLIs do not expose one stable cross-provider turn-count flag. Ignored for chat-completions providers.'
+    description: 'Turn cap for agent-runner CLIs. Enforced natively on `grok` (`--max-turns N`). Claude Code, Cursor and Codex expose no turn-count flag — the run logs a per-provider warning naming the alternative (Claude Code: `--max-budget-usd` via `agent-extra-args`; otherwise the 900 s invocation timeout is the bound). Whole number; ignored by chat-completions providers (use `max-turns`).'
     required: false
     default: ''
   agent-extra-args:
@@ -162,6 +172,18 @@ inputs:
     description: 'Pin the OpenAI Codex CLI version (npm semver). Empty = latest.'
     required: false
     default: ''
+  grok-version:
+    description: 'Pin the xAI Grok CLI version (e.g. `1.0.30`; passed to the official installer as `bash -s <version>`). Empty = latest stable. Only used when `provider: grok`.'
+    required: false
+    default: ''
+  cursor-installer-sha256:
+    description: 'Optional SHA-256 of the artefact the Cursor install step downloads — the versioned package when `cursor-version` is set, else the installer script from cursor.com/install (which is stamped with the current release, so its hash pins a version). When set, the step refuses to run an artefact whose hash differs; when empty, the step logs the observed hash so you can pin it next time. Only used when `provider: cursor`.'
+    required: false
+    default: ''
+  grok-installer-sha256:
+    description: 'Optional SHA-256 of the xAI Grok installer script (x.ai/cli/install.sh) that the Grok install step downloads. When set, the step refuses to run a script whose hash differs; when empty, the step logs the observed hash so you can pin it next time. Pair with `grok-version` to pin the binary. Only used when `provider: grok`.'
+    required: false
+    default: ''
 
   # ---------------- Iteration-Aware Review (IAR) — tunable knobs ----------------
   # IAR runs on every review. The four inputs below shape the pipeline.
@@ -182,6 +204,10 @@ inputs:
     description: 'Label name a human can apply to a PR to force a full review regardless of IAR state — dedup is skipped for that run only, persisted state is NOT mutated. Default `full-review-please`. When the label is removed, subsequent reviews resume normal IAR behavior. See docs/ITERATION_AWARENESS.md § 8.'
     required: false
     default: 'full-review-please'
+  prior-findings-resolution:
+    description: 'How the model''s verdicts on prior findings are treated in incremental follow-up rounds. `advisory` (default): a `resolved` verdict is reported in the summary but never retires the finding — a maintainer resolves the thread and the finding keeps counting toward the strictness gate. `verified`: a `resolved` verdict is honoured only when the runtime can corroborate it (fingerprint absent from this round AND the file changed since the last reviewed head or no longer exists); the thread is then replied to and resolved, and the finding stops gating. Unverifiable claims stay open under both policies.'
+    required: false
+    default: 'advisory'
 
 outputs:
   review-url:
@@ -217,7 +243,7 @@ outputs:
     description: 'Which IAR policy actually fired this run. Usually matches `convergence-policy`, but the 30% new-lines safety net overrides it to `safety-net-forced-first-pass-exhaustive`, and the escape label overrides to `escape-label-forced-full-review`. Grep marker chains for `policy=\`safety-net-forced-` / `policy=\`escape-label-forced-` to audit either override. Empty string if the IAR pipeline crashed before populating outputs.'
     value: ${{ steps.review.outputs.iteration-policy-applied }}
   iteration-tokens-used:
-    description: 'Cost-telemetry counter. Always emits `"0"` today — the runtime does not yet capture per-provider usage metadata from LLM responses into `RunTelemetry.tokens_used`, so the output is a stable placeholder that consumers can safely surface without gating on it. See `docs/ITERATION_AWARENESS.md § 13.2` for the follow-up plan. Empty string ONLY when the IAR pipeline crashed before populating outputs.'
+    description: 'Total tokens (input + output) consumed by this review, captured from the provider: API `usage` objects for `anthropic` / `openai`, the Claude Code stream-json `result` event, Codex `--json` turn events, or the Grok JSON document; `0` when the provider reports nothing (Cursor). The tracking comment shows the same numbers with cache ratio, turns and an indicative cost. Empty string ONLY when the IAR pipeline crashed before populating outputs.'
     value: ${{ steps.review.outputs.iteration-tokens-used }}
   iteration-cost-vs-baseline-estimate:
     description: 'Coarse heuristic estimate of this run''s LLM-call cost vs a projected no-dedup baseline, derived from cap expansion (`effective_cap / base_cap`) plus a small addendum-overhead flag. Always non-negative: `"0%"` when no cap expansion fires, `"+N%"` when round 1 of first-pass-exhaustive or the safety net raises the cap. Silenced-finding savings are not yet modelled (see docs/ITERATION_AWARENESS.md § 9.5). Empty string if the IAR pipeline crashed before populating outputs.'
@@ -233,7 +259,7 @@ runs:
     # ---------------------------------------------------------------
     - name: Set up Node.js (Claude Code)
       if: inputs.provider == 'claude-code'
-      uses: actions/setup-node@v6
+      uses: actions/setup-node@v7
       with:
         node-version: '20'
     - name: Install Claude Code CLI
@@ -255,7 +281,7 @@ runs:
 
     - name: Set up Node.js (Codex)
       if: inputs.provider == 'codex'
-      uses: actions/setup-node@v6
+      uses: actions/setup-node@v7
       with:
         node-version: '20'
     - name: Install OpenAI Codex CLI
@@ -279,22 +305,56 @@ runs:
       shell: bash
       env:
         CURSOR_VERSION: ${{ inputs.cursor-version }}
+        CURSOR_SHA256: ${{ inputs.cursor-installer-sha256 }}
+        ACTION_PATH: ${{ github.action_path }}
       run: |
         set -euo pipefail
+        # Self-hosted / pre-provisioned runners: honour an existing binary
+        # instead of fetching the vendor installer again (supply-chain
+        # control — see docs/SECURITY.md § "installer supply chain").
+        if command -v cursor-agent >/dev/null 2>&1; then
+          echo "cursor-agent already on PATH ($(command -v cursor-agent)) — skipping installer"
+          cursor-agent --version || true
+          exit 0
+        fi
         # Cursor's official installer script places the binary in
         # ~/.local/bin. We forward VERSION when the consumer pins it.
-        installer_url="https://cursor.com/install"
-        if [ -n "${CURSOR_VERSION}" ]; then
-          # Cursor's installer respects a VERSION env var for pinning.
-          echo "::group::Install cursor-agent (pinned to ${CURSOR_VERSION})"
-          VERSION="${CURSOR_VERSION}" curl -fsSL "${installer_url}" | bash
-        else
-          echo "::group::Install cursor-agent (latest)"
-          curl -fsSL "${installer_url}" | bash
-        fi
+        # Download-to-file + optional sha256 + install, via the shared script
+        # (also used by the CI smoke matrix). A pinned `cursor-version` installs
+        # the versioned package directly — the vendor installer ignores VERSION.
+        echo "::group::Install cursor-agent (${CURSOR_VERSION:-latest})"
+        bash "${ACTION_PATH}/.github/scripts/verified_install.sh" cursor "${CURSOR_VERSION}" "${CURSOR_SHA256}"
         echo "::endgroup::"
         echo "$HOME/.local/bin" >> "$GITHUB_PATH"
         "$HOME/.local/bin/cursor-agent" --version
+
+    - name: Install xAI Grok CLI
+      if: inputs.provider == 'grok'
+      shell: bash
+      env:
+        GROK_VERSION: ${{ inputs.grok-version }}
+        GROK_SHA256: ${{ inputs.grok-installer-sha256 }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        # Self-hosted / pre-provisioned runners: honour an existing binary
+        # instead of fetching the vendor installer again (supply-chain
+        # control — see docs/SECURITY.md § "installer supply chain").
+        if command -v grok >/dev/null 2>&1; then
+          echo "grok already on PATH ($(command -v grok)) — skipping installer"
+          grok --version || true
+          exit 0
+        fi
+        # Official installer (https://x.ai/cli/install.sh) — a host outside the
+        # GitHub/npm trust set by necessity (xAI does not publish the CLI on
+        # npm); consequences and mitigations (provider-gated, version pin,
+        # sha256 pin, skip-if-present) in docs/SECURITY.md § "installer supply
+        # chain". Downloaded to a file and verified by the shared script.
+        echo "::group::Install grok (${GROK_VERSION:-latest stable})"
+        bash "${ACTION_PATH}/.github/scripts/verified_install.sh" grok "${GROK_VERSION}" "${GROK_SHA256}"
+        echo "::endgroup::"
+        echo "$HOME/.grok/bin" >> "$GITHUB_PATH"
+        "$HOME/.grok/bin/grok" --version
 
     # ---------------------------------------------------------------
     # Main review runtime — invoked for every provider (chat-completions
@@ -313,8 +373,10 @@ runs:
         AIPRR_API_KEY: ${{ inputs.api-key }}
         AIPRR_GH_TOKEN: ${{ inputs.github-token }}
         AIPRR_MODEL: ${{ inputs.model }}
+        AIPRR_API_BASE: ${{ inputs.api-base }}
         AIPRR_PROMPT_FILE: ${{ inputs.prompt-file }}
         AIPRR_PROMPT_EXTENSION_FILE: ${{ inputs.prompt-extension-file }}
+        AIPRR_IGNORE_PATHS: ${{ inputs.ignore-paths }}
         AIPRR_AUTHOR_ASSOCIATION: ${{ inputs.author-association }}
         AIPRR_LABEL_GATE: ${{ inputs.label-gate }}
         AIPRR_TRIGGER_MODE: ${{ inputs.trigger-mode }}
@@ -332,13 +394,14 @@ runs:
         AIPRR_COMPLEXITY_LABEL_PREFIX: ${{ inputs.complexity-label-prefix }}
 
         # Agent-runner (CLI) provider parameterisation. Consumed only by the
-        # `claude-code`, `cursor`, and `codex` provider branches.
+        # `claude-code`, `cursor`, `codex`, and `grok` provider branches.
         AIPRR_AGENT_MAX_TURNS: ${{ inputs.agent-max-turns }}
         AIPRR_AGENT_EXTRA_ARGS: ${{ inputs.agent-extra-args }}
         AIPRR_MCP_CONFIG_FILE: ${{ inputs.mcp-config-file }}
         AIPRR_CLAUDE_CODE_VERSION: ${{ inputs.claude-code-version }}
         AIPRR_CURSOR_VERSION: ${{ inputs.cursor-version }}
         AIPRR_CODEX_VERSION: ${{ inputs.codex-version }}
+        AIPRR_GROK_VERSION: ${{ inputs.grok-version }}
 
         # Iteration-Aware Review (IAR). The four env vars below shape
         # the pipeline. See docs/ITERATION_AWARENESS.md.
@@ -346,6 +409,7 @@ runs:
         AIPRR_MAX_REVIEW_ROUNDS: ${{ inputs.max-review-rounds }}
         AIPRR_EXHAUSTIVE_FIRST_PASS_CAP_MULTIPLIER: ${{ inputs.exhaustive-first-pass-cap-multiplier }}
         AIPRR_ITERATION_ESCAPE_LABEL: ${{ inputs.iteration-escape-label }}
+        AIPRR_PRIOR_FINDINGS_RESOLUTION: ${{ inputs.prior-findings-resolution }}
 
         # Repo / PR context — pulled from the consumer's `pull_request` event.
         AIPRR_REPO: ${{ github.repository }}

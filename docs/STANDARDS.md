@@ -7,7 +7,7 @@ Repository conventions that apply across all contributions. For Python-specific 
 - **Product name (user-facing):** "AI Diff Reviewer". Capitalise exactly that way in user-facing copy (README, docs, marketplace listing, error messages, comments visible to users).
 - **Slug:** `ai-diff-reviewer` (lowercase, hyphenated) — matches both the GitHub repo (`DailybotHQ/ai-diff-reviewer`) and the Marketplace listing. The old `ai-pr-reviewer` slug still resolves via GitHub's permanent 301 redirect on renamed repos, so pre-rename `uses:` pins keep working; new copy-paste examples should always use the canonical slug.
 - **Env-var prefix:** `AIPRR_` (private contract, unchanged across the rename — internal only, but stable because it's referenced in local-dev docs and `CONTRIBUTING.md`).
-- **Marker constants:** `<!-- ai-pr-reviewer-marker -->`, `<!-- ai-pr-reviewer-state: … -->`, `<!-- ai-pr-reviewer-provider:… -->`, `<!-- ai-pr-reviewer-description-autocompleted -->` — deliberately preserved as-is across the rename so already-posted PR tracking comments continue to be detected by `collapse-previous` and state-lookup logic.
+- **Marker constants:** `<!-- ai-pr-reviewer-marker -->`, `<!-- ai-pr-reviewer-state: … -->`, `<!-- ai-pr-reviewer-provider:… -->`, `<!-- ai-pr-reviewer-description-autocompleted -->`, and (v2.1.0+) the per-inline-comment `<!-- ai-pr-reviewer-finding: fp=… sev=… -->` — deliberately preserved as-is across the rename so already-posted PR tracking comments and inline findings continue to be detected by `collapse-previous`, state-lookup and incremental-review logic.
 
 Don't invent variants like "AI-Diff-Reviewer", "AIDR", "AiDiffReviewer", "AI PR Reviewer" (the old name), etc. The single canonical capitalisation makes search consistent across the marketplace, GitHub, and docs.
 
@@ -37,6 +37,26 @@ Allowed types: `feat`, `fix`, `docs`, `chore`, `refactor`, `test`, `ci`, `perf`,
 - `runtime` — changes to `scripts/reviewer.py`
 - `docs` — documentation
 - `ci` — workflow or release tooling
+
+### Example commit message
+
+```
+feat(provider): add OpenAI provider
+
+## Summary
+First non-Anthropic provider — translates Anthropic-shape messages and
+tool calls to OpenAI's chat-completions schema at the boundary so the
+rest of the runtime is unchanged.
+
+## Change Log
+- New OpenAIProvider class with tool-call translation in both directions
+- New default model entry: openai → gpt-4o
+- New optional input api-base for self-hosted OpenAI-compatible endpoints
+
+## Risks
+- Translation layer is the only meaningful new surface; covered by smoke
+  test on PR #42 (provider: openai). No change to existing Anthropic path.
+```
 
 ## Branch names
 
@@ -71,10 +91,10 @@ All code, comments, documentation, commit messages, and PR descriptions are in E
 
 ## File size
 
-- `scripts/reviewer.py` — soft ceiling ~4500 LOC. We're at ~4000 today (up from ~1500 pre-v1.1.0; the v1.1.0 growth was the two provider families plus the three CLI provider impls, and v1.3–v1.4 added the author-association gate + PR-metadata check tools + PR-description autocomplete + complexity-labeling paths). If the file approaches the limit, the conversation is "should we split into multiple files" — make that decision deliberately, not by drift. The next feature that would push us past the ceiling (a raw-OpenAI/Gemini provider, `.aiprr/findings.json` v2) is likely the trigger for that conversation.
+- `scripts/reviewer.py` — one file, ~10k LOC as of v2.1.0. The historical ~4500 LOC soft ceiling was crossed deliberately by the runner × backend work, and the **decision (2026-09-16)** is: keep the single file for the rest of the v2.x line — zero-install composite action, one artefact to audit, `python3 scripts/reviewer.py` for local debugging are product features. The split is a v3.0 change with its own Deep Work Plan (a stdlib-only `scripts/aiprr/` package with `scripts/reviewer.py` as a thin entry shim; compile-all gate; prompt-sync and vendored-skill invariants unchanged). Until then, no new subsystem lands as more lines in the single file without a module plan in its PR description; reviewers treat size creep as `info` (`.review/extension.md`).
 - Doc files — under 500 lines. Long docs are signal that they need to be split.
 - Examples — under 50 lines each. They're showcase, not reference.
-- Test files — under 500 lines. Split by concern rather than growing an existing file (the current four-file split is the model).
+- Test files — under 500 lines. Split by concern rather than growing an existing file (v2.1.0's agent-runner and backend modules are the model: core / hardening / CLI invocations / Cursor / custom backends / Grok + snapshots; `api-base` / requests / matrix). Recorded debt above the line as of 2026-09-16: `test_reviewer.py` (2,623), `test_iar_observability.py` (1,419), `test_iar_state_layer.py` (885), `test_iar_dispatch.py` (608), `test_iar_dedup.py` (541), `test_iar_generation_tracking.py` (526) — pre-v2.1.0 files, split when next touched substantially; not a per-PR blocker (`info`).
 
 ## Whitespace and formatting
 
@@ -99,8 +119,8 @@ See [TESTING_GUIDE.md](TESTING_GUIDE.md). The summary:
 
 - `py_compile` is the static gate.
 - `actionlint` is the workflow gate.
-- The stdlib `unittest` suite in `tests/` is the unit gate (242 tests across four files, no third-party deps).
-- `cli-install-smoke` is the CLI-installer gate (matrix over the three agent-runner providers).
+- The stdlib `unittest` suite in `tests/` is the unit gate (720 tests across 17 files as of v2.1.0, no third-party deps).
+- `cli-install-smoke` is the CLI-installer gate (matrix over the four agent-runner providers: `claude-code`, `cursor`, `codex`, `grok`).
 - `self-review.yml` is the integration gate (always-on Anthropic baseline plus scoped CLI-provider dogfooding for provider-sensitive changes).
 
 ## Security
@@ -129,3 +149,17 @@ SemVer. Tags `vX.Y.Z`. The moving major tag for the current line (`v2`) auto-upd
 ## License
 
 MIT for everything in this repo unless a specific file says otherwise. By contributing you agree that your contribution is licensed under the same.
+
+## Skill frontmatter limits
+
+Every `skills/**/SKILL.md` follows the Open Agent Skills contract: `name` is kebab-case and at most 64 characters; `description` is one dense paragraph of at most **1,024 characters** (hosts such as Pi warn or refuse beyond that). Keep the description to the routing summary and put the full trigger catalogue in the body (`## Activation` / `## When it fires`). `scripts/validate-frontmatter.py` fails CI on either overrun and prints the measured length.
+
+## Marketplace rename decision log
+
+1. **v1.0.0 – v1.2.0:** initial `name: 'AI PR Reviewer'` (slug `ai-pr-reviewer`, repo `DailybotHQ/ai-pr-reviewer`) — assumed free based on Marketplace search.
+2. **v1.2.1:** first publish attempt failed. Misdiagnosed the collision (thought it was against the `ai-pull-request-reviewer` full-form slug owned by `appchoose/ai-pr-review`), set defensive `name: 'Dailybot AI PR Reviewer'` (slug `dailybot-ai-pr-reviewer`) as a vendor-prefix workaround.
+3. **v1.3.0:** re-checked Marketplace listing search — `ai-pr-reviewer` appeared free among Marketplace slugs. Reverted the prefix to `'AI PR Reviewer'` for cleaner OSS-community positioning. Repo still `DailybotHQ/ai-pr-reviewer`.
+4. **v1.5.0 (current, 2026-07-14):** second publish attempt failed with the correct diagnosis this time — GitHub's Marketplace name-uniqueness rule includes `user or organization name`, and the org `github.com/ai-pr-reviewer` (created 2024-01-12, 0 public repos, name-squatting) blocks the slug at the org-namespace level, not the Marketplace-listing level. Two coordinated renames:
+   - **`action.yml` `name:`** — `'AI PR Reviewer'` → `'AI Diff Reviewer'` (slug `ai-diff-reviewer`, verified free at both the Marketplace and org-namespace levels).
+   - **GitHub repo** — `DailybotHQ/ai-pr-reviewer` → `DailybotHQ/ai-diff-reviewer`. So the repo slug now matches the Marketplace slug exactly. GitHub's permanent 301 redirect on renamed repos keeps `uses: DailybotHQ/ai-pr-reviewer@v1` pins working for all existing consumers — no migration required.
+   - Rationale for the specific name: "AI Diff Reviewer" is more accurate than "AI PR Reviewer" — this action reviews the `git diff origin/<base>...HEAD` specifically, not the PR envelope (labels, description, metadata). The vendor prefix stays OFF: attribution is auto-rendered by GitHub via `author: DailybotHQ` in the listing footer, and OSS positioning is stronger without a brand prefix.
