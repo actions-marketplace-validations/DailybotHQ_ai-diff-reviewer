@@ -224,7 +224,7 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.scope.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
           # Don't persist GITHUB_TOKEN into .git/config: the CLI legs run with
